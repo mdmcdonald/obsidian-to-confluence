@@ -54,6 +54,21 @@ export class ConfluenceSettingTab extends PluginSettingTab {
 
 		if (this.plugin.settings.isDataCenter) {
 			new Setting(containerEl)
+				.setName("API Suffix")
+				.setDesc(
+					'The suffix to append to the Confluence Domain for API requests. Defaults to "/rest". Change this if your Confluence instance uses a different context path (e.g., "/wiki/rest").',
+				)
+				.addText((text) =>
+					text
+						.setPlaceholder("/rest")
+						.setValue(this.plugin.settings.apiSuffix)
+						.onChange(async (value) => {
+							this.plugin.settings.apiSuffix = value;
+							await this.plugin.saveSettings();
+						}),
+				);
+
+			new Setting(containerEl)
 				.setName("Authentication Method")
 				.setDesc("Use Personal Access Token (PAT) instead of Username/Password.")
 				.addToggle((toggle) =>

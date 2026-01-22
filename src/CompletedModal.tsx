@@ -11,6 +11,7 @@ export interface FailedFile {
 
 export interface UploadResults {
 	errorMessage: string | null;
+	errorDetails?: any;
 	failedFiles: FailedFile[];
 	filesUploadResult: UploadAdfFileResult[];
 }
@@ -20,8 +21,10 @@ export interface UploadResultsProps {
 }
 
 const CompletedView: React.FC<UploadResultsProps> = ({ uploadResults }) => {
-	const { errorMessage, failedFiles, filesUploadResult } = uploadResults;
+	const { errorMessage, errorDetails, failedFiles, filesUploadResult } =
+		uploadResults;
 	const [expanded, setExpanded] = useState(false);
+	const [showErrorDetails, setShowErrorDetails] = useState(false);
 
 	const countResults = {
 		content: { same: 0, updated: 0 },
@@ -55,7 +58,36 @@ const CompletedView: React.FC<UploadResultsProps> = ({ uploadResults }) => {
 			{errorMessage ? (
 				<div className="error-message">
 					<h3>Error</h3>
-					<p>{errorMessage}</p>
+					<textarea
+						readOnly
+						value={errorMessage}
+						style={{ width: "100%", height: "100px", resize: "vertical" }}
+					/>
+					{errorDetails && (
+						<div style={{ marginTop: "10px" }}>
+							<button onClick={() => setShowErrorDetails(!showErrorDetails)}>
+								{showErrorDetails ? "Hide" : "Show"} Technical Details
+							</button>
+							{showErrorDetails && (
+								<pre
+									style={{
+										marginTop: "10px",
+										padding: "10px",
+										background: "#333",
+										color: "#fff",
+										overflow: "auto",
+										maxHeight: "300px",
+										whiteSpace: "pre-wrap",
+										userSelect: "text",
+									}}
+								>
+									{typeof errorDetails === "string"
+										? errorDetails
+										: JSON.stringify(errorDetails, null, 2)}
+								</pre>
+							)}
+						</div>
+					)}
 				</div>
 			) : (
 				<>
