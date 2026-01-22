@@ -12,7 +12,7 @@ import { MermaidElectronPNGRenderer, PNGQuality } from "./MermaidElectronPNGRend
 import { ConfluenceSettingTab } from "./ConfluenceSettingTab";
 import ObsidianAdaptor from "./adaptors/obsidian";
 import { CompletedModal } from "./CompletedModal";
-import { ObsidianConfluenceClient } from "./MyBaseClient";
+import { ObsidianConfluenceClient, HTTPError } from "./MyBaseClient";
 import {
 	ConfluencePerPageForm,
 	ConfluencePerPageUIValues,
@@ -27,6 +27,7 @@ export interface ObsidianPluginSettings
 	usePersonalAccessToken: boolean;
 	accessToken: string;
 	atlassianPassword: string;
+	apiSuffix: string;
 }
 
 interface FailedFile {
@@ -36,6 +37,7 @@ interface FailedFile {
 
 interface UploadResults {
 	errorMessage: string | null;
+	errorDetails?: any;
 	failedFiles: FailedFile[];
 	filesUploadResult: UploadAdfFileResult[];
 }
@@ -84,7 +86,9 @@ export default class ConfluencePlugin extends Plugin {
 		}
 
 		// Determine URL Suffix
-		const urlSuffix = this.settings.isDataCenter ? "/rest" : "/wiki/rest";
+		const urlSuffix = this.settings.isDataCenter
+			? this.settings.apiSuffix || "/rest"
+			: "/wiki/rest";
 
 		return new ObsidianConfluenceClient(
 			{
@@ -162,18 +166,20 @@ export default class ConfluencePlugin extends Plugin {
 			userName: this.settings.atlassianUserName,
 			hasApiToken: !!this.settings.atlassianApiToken,
 			folderToPublish: this.settings.folderToPublish,
-			confluenceParentId: this.settings.confluenceParentId
+			confluenceParentId: this.settings.confluenceParentId,
 		});
-		
+
 		// If a specific file is provided, ensure it's passed correctly
 		if (publishFilter) {
 			console.log("Publishing specific file:", publishFilter);
 		} else if (this.settings.folderToPublish) {
 			console.log("Publishing folder:", this.settings.folderToPublish);
 		} else {
-			console.log("Warning: No specific file or folder to publish configured");
+			console.log(
+				"Warning: No specific file or folder to publish configured",
+			);
 		}
-		
+
 		const adrFiles = await this.publisher.publish(publishFilter);
 
 		const returnVal: UploadResults = {
@@ -184,9 +190,7 @@ export default class ConfluencePlugin extends Plugin {
 
 		adrFiles.forEach((element) => {
 			if (element.successfulUploadResult) {
-				returnVal.filesUploadResult.push(
-					element.successfulUploadResult,
-				);
+				returnVal.filesUploadResult.push(element.successfulUploadResult);
 				return;
 			}
 
@@ -199,6 +203,34 @@ export default class ConfluencePlugin extends Plugin {
 		return returnVal;
 	}
 
+	handleError(error: unknown) {
+		let errorMessage: string;
+		let errorDetails: any = undefined;
+
+		if (error instanceof HTTPError) {
+			errorMessage = error.message;
+			errorDetails = error.response;
+		} else if (error instanceof Error) {
+			errorMessage = error.message;
+			// @ts-ignore
+			if (error.response) {
+				// @ts-ignore
+				errorDetails = error.response;
+			}
+		} else {
+			errorMessage = JSON.stringify(error);
+		}
+
+		new CompletedModal(this.app, {
+			uploadResults: {
+				errorMessage,
+				errorDetails,
+				failedFiles: [],
+				filesUploadResult: [],
+			},
+		}).open();
+	}
+
 	override async onload() {
 		await this.init();
 
@@ -207,13 +239,15 @@ export default class ConfluencePlugin extends Plugin {
 				new Notice("Syncing already on going");
 				return;
 			}
-			
+
 			// Check if folder to publish is configured
 			if (!this.settings.folderToPublish) {
-				new Notice("Please configure 'Folder to Publish' in plugin settings");
+				new Notice(
+					"Please configure 'Folder to Publish' in plugin settings",
+				);
 				return;
 			}
-			
+
 			this.isSyncing = true;
 			try {
 				const stats = await this.doPublish();
@@ -221,23 +255,7 @@ export default class ConfluencePlugin extends Plugin {
 					uploadResults: stats,
 				}).open();
 			} catch (error) {
-				if (error instanceof Error) {
-					new CompletedModal(this.app, {
-						uploadResults: {
-							errorMessage: error.message,
-							failedFiles: [],
-							filesUploadResult: [],
-						},
-					}).open();
-				} else {
-					new CompletedModal(this.app, {
-						uploadResults: {
-							errorMessage: JSON.stringify(error),
-							failedFiles: [],
-							filesUploadResult: [],
-						},
-					}).open();
-				}
+				this.handleError(error);
 			} finally {
 				this.isSyncing = false;
 			}
@@ -286,23 +304,7 @@ export default class ConfluencePlugin extends Plugin {
 								}).open();
 							})
 							.catch((error) => {
-								if (error instanceof Error) {
-									new CompletedModal(this.app, {
-										uploadResults: {
-											errorMessage: error.message,
-											failedFiles: [],
-											filesUploadResult: [],
-										},
-									}).open();
-								} else {
-									new CompletedModal(this.app, {
-										uploadResults: {
-											errorMessage: JSON.stringify(error),
-											failedFiles: [],
-											filesUploadResult: [],
-										},
-									}).open();
-								}
+								this.handleError(error);
 							})
 							.finally(() => {
 								this.isSyncing = false;
@@ -322,7 +324,9 @@ export default class ConfluencePlugin extends Plugin {
 					if (!checking) {
 						// Check if folder to publish is configured
 						if (!this.settings.folderToPublish) {
-							new Notice("Please configure 'Folder to Publish' in plugin settings");
+							new Notice(
+								"Please configure 'Folder to Publish' in plugin settings",
+							);
 							return false;
 						}
 						this.isSyncing = true;
@@ -333,23 +337,7 @@ export default class ConfluencePlugin extends Plugin {
 								}).open();
 							})
 							.catch((error) => {
-								if (error instanceof Error) {
-									new CompletedModal(this.app, {
-										uploadResults: {
-											errorMessage: error.message,
-											failedFiles: [],
-											filesUploadResult: [],
-										},
-									}).open();
-								} else {
-									new CompletedModal(this.app, {
-										uploadResults: {
-											errorMessage: JSON.stringify(error),
-											failedFiles: [],
-											filesUploadResult: [],
-										},
-									}).open();
-								}
+								this.handleError(error);
 							})
 							.finally(() => {
 								this.isSyncing = false;
@@ -505,6 +493,7 @@ export default class ConfluencePlugin extends Plugin {
 				usePersonalAccessToken: false,
 				accessToken: "",
 				atlassianPassword: "",
+				apiSuffix: "/rest",
 			},
 			await this.loadData(),
 		);
