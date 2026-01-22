@@ -19,11 +19,32 @@ export class ConfluenceSettingTab extends PluginSettingTab {
 		});
 
 		new Setting(containerEl)
+			.setName("Use Confluence Data Center")
+			.setDesc("Enable this if you are using a self-hosted Confluence instance (Data Center or Server).")
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.plugin.settings.isDataCenter)
+					.onChange(async (value) => {
+						this.plugin.settings.isDataCenter = value;
+						await this.plugin.saveSettings();
+						this.display();
+					}),
+			);
+
+		new Setting(containerEl)
 			.setName("Confluence Domain")
-			.setDesc('Confluence Domain eg "https://mysite.atlassian.net"')
+			.setDesc(
+				this.plugin.settings.isDataCenter
+				? 'Base URL of your Confluence instance (e.g. "https://confluence.mycompany.com"). Do NOT include "/wiki" or "/rest".'
+				: 'Confluence Cloud Domain (e.g. "https://mysite.atlassian.net")'
+			)
 			.addText((text) =>
 				text
-					.setPlaceholder("https://mysite.atlassian.net")
+					.setPlaceholder(
+						this.plugin.settings.isDataCenter
+						? "https://confluence.mycompany.com"
+						: "https://mysite.atlassian.net"
+					)
 					.setValue(this.plugin.settings.confluenceBaseUrl)
 					.onChange(async (value) => {
 						this.plugin.settings.confluenceBaseUrl = value;
@@ -31,31 +52,87 @@ export class ConfluenceSettingTab extends PluginSettingTab {
 					}),
 			);
 
-		new Setting(containerEl)
-			.setName("Atlassian Username")
-			.setDesc('eg "username@domain.com"')
-			.addText((text) =>
-				text
-					.setPlaceholder("username@domain.com")
-					.setValue(this.plugin.settings.atlassianUserName)
-					.onChange(async (value) => {
-						this.plugin.settings.atlassianUserName = value;
-						await this.plugin.saveSettings();
-					}),
-			);
+		if (this.plugin.settings.isDataCenter) {
+			new Setting(containerEl)
+				.setName("Authentication Method")
+				.setDesc("Use Personal Access Token (PAT) instead of Username/Password.")
+				.addToggle((toggle) =>
+					toggle
+						.setValue(this.plugin.settings.usePersonalAccessToken)
+						.onChange(async (value) => {
+							this.plugin.settings.usePersonalAccessToken = value;
+							await this.plugin.saveSettings();
+							this.display();
+						}),
+				);
 
-		new Setting(containerEl)
-			.setName("Atlassian API Token")
-			.setDesc("")
-			.addText((text) =>
-				text
-					.setPlaceholder("")
-					.setValue(this.plugin.settings.atlassianApiToken)
-					.onChange(async (value) => {
-						this.plugin.settings.atlassianApiToken = value;
-						await this.plugin.saveSettings();
-					}),
-			);
+			if (this.plugin.settings.usePersonalAccessToken) {
+				new Setting(containerEl)
+					.setName("Personal Access Token")
+					.setDesc("Your Confluence Personal Access Token.")
+					.addText((text) => {
+						text.inputEl.type = "password";
+						text.setPlaceholder("Token...")
+							.setValue(this.plugin.settings.accessToken)
+							.onChange(async (value) => {
+								this.plugin.settings.accessToken = value;
+								await this.plugin.saveSettings();
+							});
+					});
+			} else {
+				new Setting(containerEl)
+					.setName("Username")
+					.setDesc("Your Confluence Username.")
+					.addText((text) =>
+						text
+							.setPlaceholder("username")
+							.setValue(this.plugin.settings.atlassianUserName)
+							.onChange(async (value) => {
+								this.plugin.settings.atlassianUserName = value;
+								await this.plugin.saveSettings();
+							}),
+					);
+
+				new Setting(containerEl)
+					.setName("Password")
+					.setDesc("Your Confluence Password.")
+					.addText((text) => {
+						text.inputEl.type = "password";
+						text.setPlaceholder("password")
+							.setValue(this.plugin.settings.atlassianPassword)
+							.onChange(async (value) => {
+								this.plugin.settings.atlassianPassword = value;
+								await this.plugin.saveSettings();
+							});
+					});
+			}
+		} else {
+			new Setting(containerEl)
+				.setName("Atlassian Username")
+				.setDesc('eg "username@domain.com"')
+				.addText((text) =>
+					text
+						.setPlaceholder("username@domain.com")
+						.setValue(this.plugin.settings.atlassianUserName)
+						.onChange(async (value) => {
+							this.plugin.settings.atlassianUserName = value;
+							await this.plugin.saveSettings();
+						}),
+				);
+
+			new Setting(containerEl)
+				.setName("Atlassian API Token")
+				.setDesc("")
+				.addText((text) =>
+					text
+						.setPlaceholder("")
+						.setValue(this.plugin.settings.atlassianApiToken)
+						.onChange(async (value) => {
+							this.plugin.settings.atlassianApiToken = value;
+							await this.plugin.saveSettings();
+						}),
+				);
+		}
 
 		new Setting(containerEl)
 			.setName("Confluence Parent Page ID")
