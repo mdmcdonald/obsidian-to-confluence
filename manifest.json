@@ -1,7 +1,7 @@
 {
 	"id": "confluence-integration",
 	"name": "Confluence Integration",
-	"version": "5.7.1",
+	"version": "5.8.0",
 	"minAppVersion": "1.5.0",
 	"description": "This plugin allows you to publish your notes to Confluence",
 	"author": "aaronsb",
