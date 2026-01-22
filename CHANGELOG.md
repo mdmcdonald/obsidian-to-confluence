@@ -1,5 +1,11 @@
 # Changelog
 
+## [5.8.0] (2026-01-22)
+
+### Features
+
+* Add support for Confluence Data Center (PAT & Basic Auth)
+
 ### Dependencies
 
 * The following workspace dependencies were updated
