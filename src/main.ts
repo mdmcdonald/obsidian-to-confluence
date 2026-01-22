@@ -23,6 +23,10 @@ import { Mermaid } from "mermaid";
 export interface ObsidianPluginSettings
 	extends ConfluenceUploadSettings.ConfluenceSettings {
 	mermaidQuality?: PNGQuality;  // 'low' | 'medium' | 'high', defaults to 'high'
+	isDataCenter: boolean;
+	usePersonalAccessToken: boolean;
+	accessToken: string;
+	atlassianPassword: string;
 }
 
 interface FailedFile {
@@ -53,6 +57,59 @@ export default class ConfluencePlugin extends Plugin {
 		return undefined;
 	}
 
+	getConfluenceClient(): ObsidianConfluenceClient {
+		// Determine Auth Config
+		// eslint-disable-next-line @typescript-eslint/no-explicit-any
+		let authentication: any = {};
+		if (this.settings.isDataCenter) {
+			if (this.settings.usePersonalAccessToken) {
+				authentication = {
+					bearer: this.settings.accessToken,
+				};
+			} else {
+				authentication = {
+					basic: {
+						username: this.settings.atlassianUserName,
+						password: this.settings.atlassianPassword,
+					},
+				};
+			}
+		} else {
+			authentication = {
+				basic: {
+					email: this.settings.atlassianUserName,
+					apiToken: this.settings.atlassianApiToken,
+				},
+			};
+		}
+
+		// Determine URL Suffix
+		const urlSuffix = this.settings.isDataCenter ? "/rest" : "/wiki/rest";
+
+		return new ObsidianConfluenceClient(
+			{
+				host: this.settings.confluenceBaseUrl,
+				authentication: authentication,
+				middlewares: {
+					onError(e) {
+						console.error("Confluence API Error:", e);
+						if (
+							"response" in e &&
+							e.response &&
+							"data" in e.response
+						) {
+							e.message =
+								typeof e.response.data === "string"
+									? e.response.data
+									: JSON.stringify(e.response.data);
+						}
+					},
+				},
+			},
+			urlSuffix,
+		);
+	}
+
 	async init() {
 		await this.loadSettings();
 		const { vault, metadataCache, workspace } = this.app;
@@ -65,38 +122,22 @@ export default class ConfluencePlugin extends Plugin {
 		);
 
 		// Always use PNG now - Atlassian's SVG support is garbage after 20 years
-		const quality = this.settings.mermaidQuality || 'high';
+		const quality = this.settings.mermaidQuality || "high";
 		const mermaidRenderer = new MermaidElectronPNGRenderer(quality);
 		const mermaidPlugin = new MermaidRendererPlugin(mermaidRenderer);
-		
-		console.log(`Using Electron PNG renderer (quality: ${quality}) - no external dependencies`);
-		
+
+		console.log(
+			`Using Electron PNG renderer (quality: ${quality}) - no external dependencies`,
+		);
+
 		console.log("Initializing Confluence client with:", {
 			host: this.settings.confluenceBaseUrl,
 			email: this.settings.atlassianUserName,
-			hasApiToken: !!this.settings.atlassianApiToken
+			hasApiToken: !!this.settings.atlassianApiToken,
+			isDataCenter: this.settings.isDataCenter,
 		});
-		
-		const confluenceClient = new ObsidianConfluenceClient({
-			host: this.settings.confluenceBaseUrl,
-			authentication: {
-				basic: {
-					email: this.settings.atlassianUserName,
-					apiToken: this.settings.atlassianApiToken,
-				},
-			},
-			middlewares: {
-				onError(e) {
-					console.error("Confluence API Error:", e);
-					if ("response" in e && e.response && "data" in e.response) {
-						e.message =
-							typeof e.response.data === "string"
-								? e.response.data
-								: JSON.stringify(e.response.data);
-					}
-				},
-			},
-		});
+
+		const confluenceClient = this.getConfluenceClient();
 
 		const settingsLoader = new StaticSettingsLoader(this.settings);
 		this.publisher = new Publisher(
@@ -206,15 +247,7 @@ export default class ConfluencePlugin extends Plugin {
 				);
 				console.log({ json });
 
-				const confluenceClient = new ObsidianConfluenceClient({
-					host: this.settings.confluenceBaseUrl,
-					authentication: {
-						basic: {
-							email: this.settings.atlassianUserName,
-							apiToken: this.settings.atlassianApiToken,
-						},
-					},
-				});
+				const confluenceClient = this.getConfluenceClient();
 				const testingPage =
 					await confluenceClient.content.getContentById({
 						id: "9732097",
@@ -460,8 +493,12 @@ export default class ConfluencePlugin extends Plugin {
 		this.settings = Object.assign(
 			{},
 			ConfluenceUploadSettings.DEFAULT_SETTINGS,
-			{ 
-				mermaidQuality: "high" as PNGQuality  // Default to high quality PNG
+			{
+				mermaidQuality: "high" as PNGQuality, // Default to high quality PNG
+				isDataCenter: false,
+				usePersonalAccessToken: false,
+				accessToken: "",
+				atlassianPassword: "",
 			},
 			await this.loadData(),
 		);

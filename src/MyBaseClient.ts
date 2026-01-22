@@ -10,21 +10,37 @@ import { RequiredConfluenceClient } from "@markdown-confluence/lib";
 
 async function getAuthenticationToken(
 	authentication: Config.Authentication | undefined,
-	requestData?: { baseURL: string; url: string; method: string }
+	requestData?: { baseURL: string; url: string; method: string },
 ): Promise<string | undefined> {
 	if (!authentication) return undefined;
-	
-	if ('basic' in authentication && authentication.basic) {
-		if ('email' in authentication.basic && 'apiToken' in authentication.basic) {
+
+	// eslint-disable-next-line @typescript-eslint/no-explicit-any
+	if ((authentication as any).bearer) {
+		// eslint-disable-next-line @typescript-eslint/no-explicit-any
+		return `Bearer ${(authentication as any).bearer}`;
+	}
+
+	if ("basic" in authentication && authentication.basic) {
+		if (
+			"email" in authentication.basic &&
+			"apiToken" in authentication.basic
+		) {
 			const { email, apiToken } = authentication.basic;
-			return `Basic ${Buffer.from(`${email}:${apiToken}`).toString('base64')}`;
+			return `Basic ${Buffer.from(`${email}:${apiToken}`).toString(
+				"base64",
+			)}`;
 		}
-		if ('username' in authentication.basic && 'password' in authentication.basic) {
+		if (
+			"username" in authentication.basic &&
+			"password" in authentication.basic
+		) {
 			const { username, password } = authentication.basic;
-			return `Basic ${Buffer.from(`${username}:${password}`).toString('base64')}`;
+			return `Basic ${Buffer.from(`${username}:${password}`).toString(
+				"base64",
+			)}`;
 		}
 	}
-	
+
 	return undefined;
 }
 
@@ -34,7 +50,14 @@ const ATLASSIAN_TOKEN_CHECK_NOCHECK_VALUE = "no-check";
 export class MyBaseClient implements Client {
 	protected urlSuffix = "/wiki/rest";
 
-	constructor(protected readonly config: Config) {}
+	constructor(
+		protected readonly config: Config,
+		urlSuffix?: string,
+	) {
+		if (urlSuffix) {
+			this.urlSuffix = urlSuffix;
+		}
+	}
 
 	// eslint-disable-next-line @typescript-eslint/no-explicit-any
 	protected paramSerializer(parameters: Record<string, any>): string {
@@ -228,6 +251,9 @@ export class ObsidianConfluenceClient
 	extends MyBaseClient
 	implements RequiredConfluenceClient
 {
+	constructor(config: Config, urlSuffix?: string) {
+		super(config, urlSuffix);
+	}
 	content = new Api.Content(this);
 	space = new Api.Space(this);
 	contentAttachments = new Api.ContentAttachments(this);
