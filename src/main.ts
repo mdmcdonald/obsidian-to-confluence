@@ -104,6 +104,12 @@ export default class ConfluencePlugin extends Plugin {
 									: JSON.stringify(e.response.data);
 						}
 					},
+					onResponse: (data: unknown) => {
+						if (this.settings.isDataCenter) {
+							polyfillRecursive(data);
+						}
+						return data;
+					},
 				},
 			},
 			urlSuffix,
@@ -507,5 +513,19 @@ export default class ConfluencePlugin extends Plugin {
 	async saveSettings() {
 		await this.saveData(this.settings);
 		await this.init();
+	}
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function polyfillRecursive(obj: any) {
+	if (obj && typeof obj === "object") {
+		if ("username" in obj && !("accountId" in obj)) {
+			obj.accountId = obj.username;
+		}
+		for (const key in obj) {
+			if (Object.prototype.hasOwnProperty.call(obj, key)) {
+				polyfillRecursive(obj[key]);
+			}
+		}
 	}
 }
