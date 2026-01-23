@@ -59,6 +59,10 @@ export class MyBaseClient implements Client {
 		}
 	}
 
+	protected getBaseUrl(): string {
+		return this.config.host.replace(/\/+$/, "");
+	}
+
 	// eslint-disable-next-line @typescript-eslint/no-explicit-any
 	protected paramSerializer(parameters: Record<string, any>): string {
 		const parts: string[] = [];
@@ -145,6 +149,7 @@ export class MyBaseClient implements Client {
 			}
 
 			const params = this.paramSerializer(requestConfig.params);
+			const queryString = params ? `?${params}` : "";
 
 			const requestContentType =
 				(requestConfig.headers ?? {})["Content-Type"]?.toString() ??
@@ -175,7 +180,7 @@ export class MyBaseClient implements Client {
 							{
 								// eslint-disable-next-line @typescript-eslint/naming-convention
 								baseURL: this.config.host,
-								url: `${this.config.host}${this.urlSuffix}`,
+								url: `${this.getBaseUrl()}${this.urlSuffix}`,
 								method: requestConfig.method ?? "GET",
 							},
 						),
@@ -183,7 +188,7 @@ export class MyBaseClient implements Client {
 					"Content-Type": requestContentType,
 					...requestBody[0],
 				}),
-				url: `${this.config.host}${this.urlSuffix}${requestConfig.url}?${params}`,
+				url: `${this.getBaseUrl()}${this.urlSuffix}${requestConfig.url}${queryString}`,
 				body: requestBody[1],
 				method: requestConfig.method?.toUpperCase() ?? "GET",
 				contentType: requestContentType,
