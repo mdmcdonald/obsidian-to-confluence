@@ -105,9 +105,7 @@ export default class ConfluencePlugin extends Plugin {
 						}
 					},
 					onResponse: (data: unknown) => {
-						if (this.settings.isDataCenter) {
-							polyfillRecursive(data);
-						}
+						polyfillRecursive(data);
 						return data;
 					},
 				},
