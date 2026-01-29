@@ -61,6 +61,9 @@ export class MyBaseClient implements Client {
 
 	// eslint-disable-next-line @typescript-eslint/no-explicit-any
 	protected paramSerializer(parameters: Record<string, any>): string {
+		if (!parameters) {
+			return "";
+		}
 		const parts: string[] = [];
 
 		Object.entries(parameters).forEach(([key, value]) => {
@@ -146,7 +149,7 @@ export class MyBaseClient implements Client {
 
 			const params = this.paramSerializer(requestConfig.params);
 
-			const requestContentType =
+			let requestContentType =
 				(requestConfig.headers ?? {})["Content-Type"]?.toString() ??
 				"application/json";
 
@@ -158,6 +161,14 @@ export class MyBaseClient implements Client {
 						requestConfig.data.getBuffer().buffer,
 				  ]
 				: [{}, JSON.stringify(requestConfig.data)];
+
+			if (
+				requestBody[0] &&
+				"content-type" in requestBody[0] &&
+				requestBody[0]["content-type"]
+			) {
+				requestContentType = requestBody[0]["content-type"];
+			}
 
 			const modifiedRequestConfig = {
 				...requestConfig,
