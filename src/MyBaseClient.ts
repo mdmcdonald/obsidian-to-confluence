@@ -207,9 +207,10 @@ export class MyBaseClient implements Client {
 			const responseHandler =
 				callbackResponseHandler ?? defaultResponseHandler;
 
-			this.config.middlewares?.onResponse?.(response.json);
+			const responseData = response.json;
+			this.config.middlewares?.onResponse?.(responseData);
 
-			return responseHandler(response.json);
+			return responseHandler(responseData);
 			// eslint-disable-next-line @typescript-eslint/no-explicit-any
 		} catch (e: any) {
 			console.warn({ httpError: e, requestConfig });
