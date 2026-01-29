@@ -100,10 +100,14 @@ export class MermaidElectronPNGRenderer implements MermaidRenderer {
 					// Get PNG buffer
 					const pngBuffer = image.toPNG();
 					
-					// Store the PNG
-					capturedCharts.set(chartName, pngBuffer);
-					
-					console.log(`[MermaidElectronPNGRenderer] Successfully rendered ${chartName} (${pngBuffer.length} bytes)`);
+					if (pngBuffer && pngBuffer.length > 0) {
+						// Store the PNG
+						capturedCharts.set(chartName, pngBuffer);
+						console.log(`[MermaidElectronPNGRenderer] Successfully rendered ${chartName} (${pngBuffer.length} bytes)`);
+					} else {
+						console.error(`[MermaidElectronPNGRenderer] Rendered buffer is empty for ${chartName}`);
+						throw new Error("Rendered PNG buffer is empty");
+					}
 					
 				} finally {
 					// Clean up the container

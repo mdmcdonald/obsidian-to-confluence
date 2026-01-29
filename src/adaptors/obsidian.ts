@@ -9,6 +9,28 @@ import {
 } from "@markdown-confluence/lib";
 import { lookup } from "mime-types";
 
+const SUPPORTED_IMAGE_EXTENSIONS = [
+	"bmp",
+	"cur",
+	"dds",
+	"gif",
+	"heif",
+	"icns",
+	"ico",
+	"jpeg",
+	"jpg",
+	"j2c",
+	"jp2",
+	"ktx",
+	"png",
+	"pnm",
+	"psd",
+	"svg",
+	"tga",
+	"tiff",
+	"webp",
+];
+
 export default class ObsidianAdaptor implements LoaderAdaptor {
 	vault: Vault;
 	metadataCache: MetadataCache;
@@ -102,6 +124,13 @@ export default class ObsidianAdaptor implements LoaderAdaptor {
 			referencedFromFilePath,
 		);
 		if (testing) {
+			if (
+				!SUPPORTED_IMAGE_EXTENSIONS.includes(
+					testing.extension.toLowerCase(),
+				)
+			) {
+				return false;
+			}
 			const files = await this.vault.readBinary(testing);
 			const mimeType =
 				lookup(testing.extension) || "application/octet-stream";
