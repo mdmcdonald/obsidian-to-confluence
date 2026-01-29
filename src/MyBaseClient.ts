@@ -207,7 +207,10 @@ export class MyBaseClient implements Client {
 			const responseHandler =
 				callbackResponseHandler ?? defaultResponseHandler;
 
-			const responseData = response.json;
+			const responseData =
+				response.text && response.text.trim().length > 0
+					? response.json
+					: {};
 			this.config.middlewares?.onResponse?.(responseData);
 
 			return responseHandler(responseData);
