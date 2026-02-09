@@ -1,3 +1,6 @@
 node_modules/
 *.log
 .DS_Store
+
+# Windows reserved device names (can't be indexed by git)
+nul

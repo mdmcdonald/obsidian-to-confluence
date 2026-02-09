@@ -202,10 +202,25 @@ export class MyBaseClient implements Client {
 			};
 			delete modifiedRequestConfig.data;
 
+			const method = modifiedRequestConfig.method;
+			const url = modifiedRequestConfig.url;
+			console.log(`[Confluence API] ${method} ${url}`);
+
+			// Log request body for content mutations (but truncate large bodies)
+			if (requestConfig.data && (method === "PUT" || method === "POST")) {
+				const bodyStr = typeof requestBody[1] === "string" ? requestBody[1] : "(binary)";
+				const bodyPreview = bodyStr.length > 500 ? bodyStr.substring(0, 500) + `... (${bodyStr.length} chars total)` : bodyStr;
+				console.log(`[Confluence API] Request body: ${bodyPreview}`);
+			}
+
 			const response = await requestUrl(modifiedRequestConfig);
 
+			console.log(`[Confluence API] Response: ${response.status} (${response.text?.length ?? 0} chars)`);
+
 			if (response.status >= 400) {
-				throw new HTTPError(`Received a ${response.status}`, {
+				const errorBody = response.text || "(empty response)";
+				console.error(`[Confluence API] Error ${response.status}: ${errorBody.substring(0, 1000)}`);
+				throw new HTTPError(`Received a ${response.status}: ${errorBody.substring(0, 200)}`, {
 					status: response.status,
 					data: response.text,
 				});
@@ -227,7 +242,22 @@ export class MyBaseClient implements Client {
 			return responseHandler(responseData);
 			// eslint-disable-next-line @typescript-eslint/no-explicit-any
 		} catch (e: any) {
-			console.warn({ httpError: e, requestConfig });
+			const method = requestConfig.method?.toUpperCase() ?? "GET";
+			const path = requestConfig.url ?? "(unknown)";
+
+			// Extract the most useful error message
+			let errorDetail = "";
+			if (e instanceof HTTPError) {
+				errorDetail = typeof e.response.data === "string"
+					? e.response.data.substring(0, 500)
+					: JSON.stringify(e.response.data).substring(0, 500);
+			} else if (e instanceof Error) {
+				errorDetail = e.message;
+			} else {
+				errorDetail = JSON.stringify(e).substring(0, 500);
+			}
+			console.error(`[Confluence API] ${method} ${path} failed: ${errorDetail}`);
+
 			const err = e.isAxiosError && e.response ? e.response.data : e;
 
 			const callbackErrorHandler =

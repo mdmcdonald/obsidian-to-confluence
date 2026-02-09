@@ -105,12 +105,20 @@ export default class ObsidianAdaptor implements LoaderAdaptor {
 			}
 		}
 
+		let contents = await this.vault.cachedRead(file);
+
+		// Normalize Windows \r\n line endings to \n so the library's
+		// frontmatter regex and markdown parser work correctly.
+		contents = contents.replace(/\r\n/g, "\n");
+
+		console.log(`[Confluence] Loaded file: ${file.path} (${contents.length} chars, frontmatter keys: ${Object.keys(parsedFrontMatter).join(", ") || "none"})`);
+
 		return {
 			pageTitle: file.basename,
 			folderName: file.parent?.name || "",
 			absoluteFilePath: file.path,
 			fileName: file.name,
-			contents: await this.vault.cachedRead(file),
+			contents,
 			frontmatter: parsedFrontMatter,
 		};
 	}

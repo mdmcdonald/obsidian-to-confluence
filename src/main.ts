@@ -156,25 +156,21 @@ export default class ConfluencePlugin extends Plugin {
 
 
 	async doPublish(publishFilter?: string): Promise<UploadResults> {
-		console.log("Starting publish with filter:", publishFilter);
-		console.log("Settings:", {
+		console.log("[Confluence] === Starting Publish ===");
+		console.log("[Confluence] Filter:", publishFilter ?? "(all files)");
+		console.log("[Confluence] Settings:", {
 			baseUrl: this.settings.confluenceBaseUrl,
 			userName: this.settings.atlassianUserName,
 			hasApiToken: !!this.settings.atlassianApiToken,
 			folderToPublish: this.settings.folderToPublish,
-			confluenceParentId: this.settings.confluenceParentId
+			confluenceParentId: this.settings.confluenceParentId,
+			firstHeadingPageTitle: this.settings.firstHeadingPageTitle,
+			isDataCenter: this.settings.isDataCenter,
 		});
-		
-		// If a specific file is provided, ensure it's passed correctly
-		if (publishFilter) {
-			console.log("Publishing specific file:", publishFilter);
-		} else if (this.settings.folderToPublish) {
-			console.log("Publishing folder:", this.settings.folderToPublish);
-		} else {
-			console.log("Warning: No specific file or folder to publish configured");
-		}
-		
+
 		const adrFiles = await this.publisher.publish(publishFilter);
+
+		console.log(`[Confluence] Publisher returned ${adrFiles.length} file result(s)`);
 
 		const returnVal: UploadResults = {
 			errorMessage: null,
@@ -184,17 +180,30 @@ export default class ConfluencePlugin extends Plugin {
 
 		adrFiles.forEach((element) => {
 			if (element.successfulUploadResult) {
-				returnVal.filesUploadResult.push(
-					element.successfulUploadResult,
-				);
+				const result = element.successfulUploadResult;
+				console.log(`[Confluence] SUCCESS: ${result.adfFile.absoluteFilePath} -> ${result.adfFile.pageUrl} (content: ${result.contentResult}, images: ${result.imageResult}, labels: ${result.labelResult})`);
+				returnVal.filesUploadResult.push(result);
 				return;
+			}
+
+			const reason = element.reason ?? "No Reason Provided";
+			console.error(`[Confluence] FAILED: ${element.node.file.absoluteFilePath} -> ${reason}`);
+
+			// Log extra context for common failure modes
+			if (reason.includes("last updated by another user")) {
+				console.error(`[Confluence] This usually means the page was just created or edited by a different account. Check that your API credentials match the account that owns these pages.`);
+			}
+			if (reason.includes("outside the page tree")) {
+				console.error(`[Confluence] A page with this title already exists in a different location in Confluence.`);
 			}
 
 			returnVal.failedFiles.push({
 				fileName: element.node.file.absoluteFilePath,
-				reason: element.reason ?? "No Reason Provided",
+				reason,
 			});
 		});
+
+		console.log(`[Confluence] === Publish Complete: ${returnVal.filesUploadResult.length} succeeded, ${returnVal.failedFiles.length} failed ===`);
 
 		return returnVal;
 	}
@@ -207,13 +216,13 @@ export default class ConfluencePlugin extends Plugin {
 				new Notice("Syncing already on going");
 				return;
 			}
-			
+
 			// Check if folder to publish is configured
 			if (!this.settings.folderToPublish) {
 				new Notice("Please configure 'Folder to Publish' in plugin settings");
 				return;
 			}
-			
+
 			this.isSyncing = true;
 			try {
 				const stats = await this.doPublish();
@@ -221,23 +230,15 @@ export default class ConfluencePlugin extends Plugin {
 					uploadResults: stats,
 				}).open();
 			} catch (error) {
-				if (error instanceof Error) {
-					new CompletedModal(this.app, {
-						uploadResults: {
-							errorMessage: error.message,
-							failedFiles: [],
-							filesUploadResult: [],
-						},
-					}).open();
-				} else {
-					new CompletedModal(this.app, {
-						uploadResults: {
-							errorMessage: JSON.stringify(error),
-							failedFiles: [],
-							filesUploadResult: [],
-						},
-					}).open();
-				}
+				const errorMessage = extractErrorMessage(error);
+				console.error("[Confluence] Publish failed with top-level error:", error);
+				new CompletedModal(this.app, {
+					uploadResults: {
+						errorMessage,
+						failedFiles: [],
+						filesUploadResult: [],
+					},
+				}).open();
 			} finally {
 				this.isSyncing = false;
 			}
@@ -286,23 +287,14 @@ export default class ConfluencePlugin extends Plugin {
 								}).open();
 							})
 							.catch((error) => {
-								if (error instanceof Error) {
-									new CompletedModal(this.app, {
-										uploadResults: {
-											errorMessage: error.message,
-											failedFiles: [],
-											filesUploadResult: [],
-										},
-									}).open();
-								} else {
-									new CompletedModal(this.app, {
-										uploadResults: {
-											errorMessage: JSON.stringify(error),
-											failedFiles: [],
-											filesUploadResult: [],
-										},
-									}).open();
-								}
+								console.error("[Confluence] Publish current file failed:", error);
+								new CompletedModal(this.app, {
+									uploadResults: {
+										errorMessage: extractErrorMessage(error),
+										failedFiles: [],
+										filesUploadResult: [],
+									},
+								}).open();
 							})
 							.finally(() => {
 								this.isSyncing = false;
@@ -333,23 +325,14 @@ export default class ConfluencePlugin extends Plugin {
 								}).open();
 							})
 							.catch((error) => {
-								if (error instanceof Error) {
-									new CompletedModal(this.app, {
-										uploadResults: {
-											errorMessage: error.message,
-											failedFiles: [],
-											filesUploadResult: [],
-										},
-									}).open();
-								} else {
-									new CompletedModal(this.app, {
-										uploadResults: {
-											errorMessage: JSON.stringify(error),
-											failedFiles: [],
-											filesUploadResult: [],
-										},
-									}).open();
-								}
+								console.error("[Confluence] Publish all failed:", error);
+								new CompletedModal(this.app, {
+									uploadResults: {
+										errorMessage: extractErrorMessage(error),
+										failedFiles: [],
+										filesUploadResult: [],
+									},
+								}).open();
 							})
 							.finally(() => {
 								this.isSyncing = false;
@@ -513,6 +496,28 @@ export default class ConfluencePlugin extends Plugin {
 	async saveSettings() {
 		await this.saveData(this.settings);
 		await this.init();
+	}
+}
+
+function extractErrorMessage(error: unknown): string {
+	if (error instanceof Error) {
+		// Include the response data if it's an HTTPError
+		if ("response" in error && typeof (error as any).response === "object") {
+			const resp = (error as any).response;
+			const data = typeof resp.data === "string"
+				? resp.data
+				: JSON.stringify(resp.data);
+			return `${error.message}\n\nAPI Response (status ${resp.status ?? "unknown"}):\n${data?.substring(0, 500) ?? "(empty)"}`;
+		}
+		return error.message;
+	}
+	if (typeof error === "string") {
+		return error;
+	}
+	try {
+		return JSON.stringify(error, null, 2);
+	} catch {
+		return String(error);
 	}
 }
 
