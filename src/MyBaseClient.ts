@@ -156,8 +156,26 @@ export class MyBaseClient implements Client {
 			) {
 				const adfBody = requestConfig.data.body.atlas_doc_format;
 				console.log("[Confluence API] Converting atlas_doc_format to storage format locally...");
+				console.log(`[Confluence API] attachmentFileMap has ${this.attachmentFileMap.size} entries:`, JSON.stringify(Object.fromEntries(this.attachmentFileMap)));
 				try {
 					const adfJson = JSON.parse(adfBody.value);
+					// Log media nodes in the ADF for debugging
+					const mediaNodes: string[] = [];
+					const findMedia = (node: unknown) => {
+						if (!node || typeof node !== "object") return;
+						const n = node as Record<string, unknown>;
+						if (n.type === "media") {
+							const a = (n.attrs ?? {}) as Record<string, unknown>;
+							mediaNodes.push(JSON.stringify({ type: a.type, id: a.id, collection: a.collection, __fileName: a.__fileName, url: a.url }));
+						}
+						if (Array.isArray(n.content)) {
+							for (const child of n.content) findMedia(child);
+						}
+					};
+					findMedia(adfJson);
+					if (mediaNodes.length > 0) {
+						console.log(`[Confluence API] ADF contains ${mediaNodes.length} media node(s):`, mediaNodes.join(", "));
+					}
 					let storageValue = convertAdfToStorageFormat(adfJson, this.attachmentFileMap);
 					// The library hardcodes /wiki/spaces/ in content links,
 					// which is wrong for Data Center (uses /spaces/).
@@ -264,6 +282,34 @@ export class MyBaseClient implements Client {
 			if (method === "PUT" && requestConfig.url?.match(/^\/api\/content\//)) {
 				const respPreview = (response.text ?? "").substring(0, 500);
 				console.log(`[Confluence API] Update response body: ${respPreview}`);
+			}
+
+			// Log attachment-related responses in detail to diagnose Data Center issues
+			if (requestConfig.url?.match(/\/child\/attachment/)) {
+				try {
+					const parsed = response.json;
+					if (parsed?.results && Array.isArray(parsed.results)) {
+						console.log(`[Confluence API] Attachment response: ${parsed.results.length} result(s)`);
+						if (parsed.results.length > 0) {
+							const first = parsed.results[0];
+							console.log(`[Confluence API] First attachment structure:`, JSON.stringify({
+								id: first.id,
+								type: first.type,
+								title: first.title,
+								hasMetadata: !!first.metadata,
+								metadataComment: first.metadata?.comment ?? "(absent)",
+								hasExtensions: !!first.extensions,
+								extensionKeys: first.extensions ? Object.keys(first.extensions) : [],
+								extensionsFileId: first.extensions?.fileId ?? "(absent)",
+								extensionsCollectionName: first.extensions?.collectionName ?? "(absent)",
+								hasContainer: !!first.container,
+								containerId: first.container?.id ?? "(absent)",
+							}));
+						}
+					}
+				} catch {
+					// Non-JSON response, skip
+				}
 			}
 
 			if (response.status >= 400) {

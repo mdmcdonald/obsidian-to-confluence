@@ -97,7 +97,9 @@ function convertMedia(node: AdfNode): string {
 	// from attachment upload responses). This handles media nodes created by
 	// MermaidRendererPlugin which only have collection/id but no __fileName.
 	if (!filename && attrs.id && activeFileMap) {
-		filename = activeFileMap.get(String(attrs.id)) ?? "";
+		const lookupId = String(attrs.id);
+		filename = activeFileMap.get(lookupId) ?? "";
+		console.log(`[ADF→Storage] Media filename lookup: id="${lookupId}" → ${filename ? `"${filename}"` : "(not found)"}, map size=${activeFileMap.size}`);
 	}
 
 	// File attachment

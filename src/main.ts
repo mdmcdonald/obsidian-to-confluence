@@ -541,15 +541,36 @@ function polyfillRecursive(obj: any) {
 		if ("username" in obj && !("accountId" in obj)) {
 			obj.accountId = obj.username;
 		}
-		// Data Center attachment responses may lack extensions or extensions.fileId.
-		// The library (Attachments.js) accesses extensions.fileId to get the file ID.
-		// On Data Center this field doesn't exist, so polyfill it from the attachment id.
+		// Data Center attachment responses differ from Cloud in several ways.
+		// The library expects Cloud-style fields. Polyfill them for Data Center:
+		//
+		// Publisher.js:82-91 builds currentAttachments using:
+		//   - curr.metadata.comment       → CRASH if metadata absent
+		//   - curr.extensions.fileId       → absent on DC
+		//   - curr.extensions.collectionName → absent on DC
+		//
+		// Attachments.js:37,87 reads:
+		//   - attachmentUploadResponse.extensions.fileId → absent on DC
+		//
 		if ("type" in obj && obj.type === "attachment" && "id" in obj) {
+			// Ensure extensions object exists
 			if (!obj.extensions) {
 				obj.extensions = {};
 			}
+			// Polyfill fileId from the attachment's top-level id
 			if (!obj.extensions.fileId) {
 				obj.extensions.fileId = obj.id;
+			}
+			// Polyfill collectionName from the container id
+			if (!obj.extensions.collectionName && obj.container?.id) {
+				obj.extensions.collectionName = `contentId-${obj.container.id}`;
+			}
+			// Ensure metadata.comment exists (used as file hash for dedup)
+			if (!obj.metadata) {
+				obj.metadata = {};
+			}
+			if (obj.metadata.comment === undefined) {
+				obj.metadata.comment = "";
 			}
 		}
 		for (const key in obj) {
