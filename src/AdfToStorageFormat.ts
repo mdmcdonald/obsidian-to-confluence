@@ -75,9 +75,14 @@ function convertCodeBlock(node: AdfNode): string {
 	);
 }
 
+// Module-level reference to the active file map during conversion.
+// Set by convertAdfToStorageFormat() and used by convertMedia() to resolve
+// attachment filenames for media nodes that only have collection/id (e.g. mermaid).
+let activeFileMap: Map<string, string> | undefined;
+
 function convertMedia(node: AdfNode): string {
 	const attrs = node.attrs ?? {};
-	const filename = attrs.__fileName || attrs.alt || "";
+	let filename = attrs.__fileName || attrs.alt || "";
 	const width = attrs.width ? ` ac:width="${attrs.width}"` : "";
 
 	if (attrs.type === "external") {
@@ -86,6 +91,13 @@ function convertMedia(node: AdfNode): string {
 			`<ri:url ri:value="${escapeHtml(attrs.url ?? "")}" />` +
 			`</ac:image>`
 		);
+	}
+
+	// If no filename, try resolving from the attachment file map (populated
+	// from attachment upload responses). This handles media nodes created by
+	// MermaidRendererPlugin which only have collection/id but no __fileName.
+	if (!filename && attrs.id && activeFileMap) {
+		filename = activeFileMap.get(String(attrs.id)) ?? "";
 	}
 
 	// File attachment
@@ -97,7 +109,8 @@ function convertMedia(node: AdfNode): string {
 		);
 	}
 
-	// Fallback: if we have a collection/id but no filename, try attachment by ID
+	// Fallback: no filename could be resolved
+	console.warn(`[ADF→Storage] Media node with no resolvable filename: id=${attrs.id}, collection=${attrs.collection}`);
 	return "";
 }
 
@@ -220,12 +233,20 @@ function convertNode(node: AdfNode): string {
 
 /**
  * Convert an ADF document (as parsed JSON object) to Confluence storage format XHTML.
+ * @param adf The ADF document JSON
+ * @param fileMap Optional map of attachment ID → filename, used to resolve media nodes
+ *               that only have id/collection (e.g. mermaid chart attachments)
  */
-export function convertAdfToStorageFormat(adf: AdfNode): string {
-	if (!adf) return "";
-	if (adf.type === "doc") {
-		return convertChildren(adf);
+export function convertAdfToStorageFormat(adf: AdfNode, fileMap?: Map<string, string>): string {
+	activeFileMap = fileMap;
+	try {
+		if (!adf) return "";
+		if (adf.type === "doc") {
+			return convertChildren(adf);
+		}
+		// If it's not a doc node, try to convert it directly
+		return convertNode(adf);
+	} finally {
+		activeFileMap = undefined;
 	}
-	// If it's not a doc node, try to convert it directly
-	return convertNode(adf);
 }

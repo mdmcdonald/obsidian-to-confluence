@@ -541,6 +541,17 @@ function polyfillRecursive(obj: any) {
 		if ("username" in obj && !("accountId" in obj)) {
 			obj.accountId = obj.username;
 		}
+		// Data Center attachment responses may lack extensions or extensions.fileId.
+		// The library (Attachments.js) accesses extensions.fileId to get the file ID.
+		// On Data Center this field doesn't exist, so polyfill it from the attachment id.
+		if ("type" in obj && obj.type === "attachment" && "id" in obj) {
+			if (!obj.extensions) {
+				obj.extensions = {};
+			}
+			if (!obj.extensions.fileId) {
+				obj.extensions.fileId = obj.id;
+			}
+		}
 		for (const key in obj) {
 			if (Object.prototype.hasOwnProperty.call(obj, key)) {
 				polyfillRecursive(obj[key]);

@@ -50,6 +50,10 @@ const ATLASSIAN_TOKEN_CHECK_NOCHECK_VALUE = "no-check";
 
 export class MyBaseClient implements Client {
 	protected urlSuffix = "/wiki/rest";
+	// Maps attachment IDs (and fileIds) to filenames, populated from attachment
+	// upload responses. Used during ADF-to-storage conversion so that media nodes
+	// created by MermaidRendererPlugin (which lack __fileName) can be resolved.
+	protected attachmentFileMap: Map<string, string> = new Map();
 
 	constructor(
 		protected readonly config: Config,
@@ -154,7 +158,7 @@ export class MyBaseClient implements Client {
 				console.log("[Confluence API] Converting atlas_doc_format to storage format locally...");
 				try {
 					const adfJson = JSON.parse(adfBody.value);
-					let storageValue = convertAdfToStorageFormat(adfJson);
+					let storageValue = convertAdfToStorageFormat(adfJson, this.attachmentFileMap);
 					// The library hardcodes /wiki/spaces/ in content links,
 					// which is wrong for Data Center (uses /spaces/).
 					if (this.urlSuffix === "/rest") {
@@ -283,6 +287,23 @@ export class MyBaseClient implements Client {
 					? response.json
 					: {};
 			this.config.middlewares?.onResponse?.(responseData);
+
+			// Track attachment filenames from upload responses so we can
+			// resolve media nodes (e.g. from MermaidRendererPlugin) that
+			// only have collection/id but no __fileName during ADF→storage conversion.
+			// eslint-disable-next-line @typescript-eslint/no-explicit-any
+			const resData = responseData as any;
+			if (resData?.results && Array.isArray(resData.results)) {
+				for (const result of resData.results) {
+					if (result?.type === "attachment" && result?.id && result?.title) {
+						this.attachmentFileMap.set(String(result.id), String(result.title));
+						// Also map by fileId if it differs from id (Cloud uses UUIDs)
+						if (result?.extensions?.fileId && result.extensions.fileId !== result.id) {
+							this.attachmentFileMap.set(String(result.extensions.fileId), String(result.title));
+						}
+					}
+				}
+			}
 
 			return responseHandler(responseData);
 			// eslint-disable-next-line @typescript-eslint/no-explicit-any
