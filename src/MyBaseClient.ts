@@ -7,6 +7,7 @@ import {
 } from "confluence.js";
 import { requestUrl } from "obsidian";
 import { RequiredConfluenceClient } from "@markdown-confluence/lib";
+import { convertAdfToStorageFormat } from "./AdfToStorageFormat";
 
 async function getAuthenticationToken(
 	authentication: Config.Authentication | undefined,
@@ -143,40 +144,30 @@ export class MyBaseClient implements Client {
 			// The @markdown-confluence/lib Publisher sends content as atlas_doc_format,
 			// but many Confluence instances (especially Data Center) silently ignore it
 			// via REST API v1, accepting the request but leaving the page body empty.
-			// Converting to storage format is universally supported.
+			// Converting to storage format locally is universally supported.
 			if (
 				requestConfig.method?.toUpperCase() === "PUT" &&
 				requestConfig.url?.match(/^\/api\/content\//) &&
 				requestConfig.data?.body?.atlas_doc_format
 			) {
 				const adfBody = requestConfig.data.body.atlas_doc_format;
-				console.log("[Confluence API] Converting atlas_doc_format to storage format...");
+				console.log("[Confluence API] Converting atlas_doc_format to storage format locally...");
 				try {
-					// eslint-disable-next-line @typescript-eslint/no-explicit-any
-					const converted = await this.sendRequest<any>(
-						{
-							url: "/api/contentbody/convert/storage",
-							method: "POST",
-							data: {
-								value: adfBody.value,
-								representation: "atlas_doc_format",
-							},
-						},
-						null as never,
-					);
+					const adfJson = JSON.parse(adfBody.value);
+					const storageValue = convertAdfToStorageFormat(adfJson);
 					requestConfig.data = {
 						...requestConfig.data,
 						body: {
 							storage: {
-								value: converted.value,
+								value: storageValue,
 								representation: "storage",
 							},
 						},
 					};
-					console.log(`[Confluence API] Converted to storage format (${converted.value?.length ?? 0} chars)`);
+					console.log(`[Confluence API] Converted to storage format (${storageValue.length} chars): ${storageValue.substring(0, 200)}`);
 				} catch (conversionError) {
 					console.warn(
-						"[Confluence API] ADF-to-storage conversion failed, using atlas_doc_format as fallback:",
+						"[Confluence API] Local ADF-to-storage conversion failed, using atlas_doc_format as fallback:",
 						conversionError instanceof Error ? conversionError.message : String(conversionError),
 					);
 				}
