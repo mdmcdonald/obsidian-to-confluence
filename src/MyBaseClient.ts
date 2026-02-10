@@ -214,14 +214,18 @@ export class MyBaseClient implements Client {
 				(requestConfig.headers ?? {})["Content-Type"]?.toString() ??
 				"application/json";
 
-			const requestBody = requestContentType.startsWith(
-				"multipart/form-data",
-			)
-				? [
-						requestConfig.data.getHeaders(),
-						requestConfig.data.getBuffer().buffer,
-				  ]
-				: [{}, JSON.stringify(requestConfig.data)];
+			// eslint-disable-next-line @typescript-eslint/no-explicit-any
+			let requestBody: any[];
+			if (requestContentType.startsWith("multipart/form-data")) {
+				const formHeaders = requestConfig.data.getHeaders();
+				// Use slice to get a clean ArrayBuffer — Node.js Buffers can share
+				// a pooled ArrayBuffer, so .buffer alone may include unrelated data.
+				const buf: Buffer = requestConfig.data.getBuffer();
+				const arrayBuffer = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
+				requestBody = [formHeaders, arrayBuffer];
+			} else {
+				requestBody = [{}, JSON.stringify(requestConfig.data)];
+			}
 
 			if (
 				requestBody[0] &&
@@ -332,6 +336,27 @@ export class MyBaseClient implements Client {
 				response.text && response.text.trim().length > 0
 					? response.json
 					: {};
+
+			// Data Center attachment responses may omit `container` (the parent page).
+			// Attachments.js directly accesses `container.id` to build collection names,
+			// so we must polyfill it from the request URL before returning the response.
+			if (requestConfig.url?.match(/\/child\/attachment/)) {
+				const pageIdMatch = requestConfig.url.match(/\/api\/content\/([^/]+)\/child\/attachment/);
+				if (pageIdMatch) {
+					const pageId = pageIdMatch[1];
+					// eslint-disable-next-line @typescript-eslint/no-explicit-any
+					const attachData = responseData as any;
+					if (attachData?.results && Array.isArray(attachData.results)) {
+						for (const result of attachData.results) {
+							if (result && typeof result === "object" && !result.container) {
+								result.container = { id: pageId, type: "page" };
+								console.log(`[Confluence API] Polyfilled missing container on attachment ${result.id} with pageId=${pageId}`);
+							}
+						}
+					}
+				}
+			}
+
 			this.config.middlewares?.onResponse?.(responseData);
 
 			// Track attachment filenames from upload responses so we can
