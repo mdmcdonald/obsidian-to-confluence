@@ -170,6 +170,20 @@ export default class ConfluencePlugin extends Plugin {
 
 		const adrFiles = await this.publisher.publish(publishFilter);
 
+		// The library hardcodes /wiki/spaces/ in page URLs, which is correct
+		// for Cloud but wrong for Data Center (which uses /spaces/).
+		if (this.settings.isDataCenter) {
+			for (const result of adrFiles) {
+				if (result.successfulUploadResult) {
+					result.successfulUploadResult.adfFile.pageUrl =
+						result.successfulUploadResult.adfFile.pageUrl.replace("/wiki/spaces/", "/spaces/");
+				}
+				if (result.node?.file?.pageUrl) {
+					result.node.file.pageUrl = result.node.file.pageUrl.replace("/wiki/spaces/", "/spaces/");
+				}
+			}
+		}
+
 		console.log(`[Confluence] Publisher returned ${adrFiles.length} file result(s)`);
 
 		const returnVal: UploadResults = {

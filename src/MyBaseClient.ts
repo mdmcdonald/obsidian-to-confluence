@@ -154,7 +154,12 @@ export class MyBaseClient implements Client {
 				console.log("[Confluence API] Converting atlas_doc_format to storage format locally...");
 				try {
 					const adfJson = JSON.parse(adfBody.value);
-					const storageValue = convertAdfToStorageFormat(adfJson);
+					let storageValue = convertAdfToStorageFormat(adfJson);
+					// The library hardcodes /wiki/spaces/ in content links,
+					// which is wrong for Data Center (uses /spaces/).
+					if (this.urlSuffix === "/rest") {
+						storageValue = storageValue.replace(/\/wiki\/spaces\//g, "/spaces/");
+					}
 					requestConfig.data = {
 						...requestConfig.data,
 						body: {
