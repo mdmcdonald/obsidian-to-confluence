@@ -139,6 +139,49 @@ export class MyBaseClient implements Client {
 		callback: Callback<T> | never,
 	): Promise<void | T> {
 		try {
+			// Convert atlas_doc_format to storage (XHTML) format for content updates.
+			// The @markdown-confluence/lib Publisher sends content as atlas_doc_format,
+			// but many Confluence instances (especially Data Center) silently ignore it
+			// via REST API v1, accepting the request but leaving the page body empty.
+			// Converting to storage format is universally supported.
+			if (
+				requestConfig.method?.toUpperCase() === "PUT" &&
+				requestConfig.url?.match(/^\/api\/content\//) &&
+				requestConfig.data?.body?.atlas_doc_format
+			) {
+				const adfBody = requestConfig.data.body.atlas_doc_format;
+				console.log("[Confluence API] Converting atlas_doc_format to storage format...");
+				try {
+					// eslint-disable-next-line @typescript-eslint/no-explicit-any
+					const converted = await this.sendRequest<any>(
+						{
+							url: "/api/contentbody/convert/storage",
+							method: "POST",
+							data: {
+								value: adfBody.value,
+								representation: "atlas_doc_format",
+							},
+						},
+						null as never,
+					);
+					requestConfig.data = {
+						...requestConfig.data,
+						body: {
+							storage: {
+								value: converted.value,
+								representation: "storage",
+							},
+						},
+					};
+					console.log(`[Confluence API] Converted to storage format (${converted.value?.length ?? 0} chars)`);
+				} catch (conversionError) {
+					console.warn(
+						"[Confluence API] ADF-to-storage conversion failed, using atlas_doc_format as fallback:",
+						conversionError instanceof Error ? conversionError.message : String(conversionError),
+					);
+				}
+			}
+
 			const contentType = (requestConfig.headers ?? {})[
 				"content-type"
 			]?.toString();
@@ -216,6 +259,12 @@ export class MyBaseClient implements Client {
 			const response = await requestUrl(modifiedRequestConfig);
 
 			console.log(`[Confluence API] Response: ${response.status} (${response.text?.length ?? 0} chars)`);
+
+			// Log response body for content update PUTs to help debug empty page issues
+			if (method === "PUT" && requestConfig.url?.match(/^\/api\/content\//)) {
+				const respPreview = (response.text ?? "").substring(0, 500);
+				console.log(`[Confluence API] Update response body: ${respPreview}`);
+			}
 
 			if (response.status >= 400) {
 				const errorBody = response.text || "(empty response)";
