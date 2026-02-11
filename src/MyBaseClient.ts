@@ -200,6 +200,18 @@ export class MyBaseClient implements Client {
 				}
 			}
 
+			// Data Center does not support PUT on /child/attachment (returns 405).
+			// The confluence.js library uses PUT for createOrUpdateAttachments,
+			// which works on Cloud but not DC. Change to POST for DC.
+			if (
+				this.urlSuffix === "/rest" &&
+				requestConfig.method?.toUpperCase() === "PUT" &&
+				requestConfig.url?.match(/\/child\/attachment\/?$/)
+			) {
+				console.log("[Confluence API] Data Center: rewriting PUT to POST for attachment upload");
+				requestConfig.method = "POST";
+			}
+
 			const contentType = (requestConfig.headers ?? {})[
 				"content-type"
 			]?.toString();
