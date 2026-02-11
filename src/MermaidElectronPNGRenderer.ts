@@ -67,24 +67,32 @@ export class MermaidElectronPNGRenderer implements MermaidRenderer {
 					const scaledHeight = Math.ceil(height * scale);
 					console.log(`[MermaidPNG] Step 2 - Dimensions: ${width}x${height} -> ${scaledWidth}x${scaledHeight}`);
 
-					// Step 3: Fix SVG dimensions. Mermaid outputs width="100%" and
-					// height="null" which prevents both createImageBitmap and <img>
-					// from determining intrinsic size. Replace with explicit pixels.
+					// Step 3: Fix SVG dimensions on the root <svg> element only.
+					// Mermaid outputs width="100%" and no height attribute, which
+					// prevents createImageBitmap from determining intrinsic size.
+					// We extract and modify just the opening <svg ...> tag to avoid
+					// corrupting width/height attributes on child elements.
+					const svgTagMatch = svg.match(/^(<svg\s[^>]*>)/);
 					let fixedSvg = svg;
-					// Replace width attribute (handles 100%, null, or any value)
-					if (fixedSvg.match(/\swidth="[^"]*"/)) {
-						fixedSvg = fixedSvg.replace(/\swidth="[^"]*"/, ` width="${scaledWidth}"`);
+					if (svgTagMatch) {
+						let svgTag = svgTagMatch[1];
+						// Replace or add width
+						if (/\swidth="[^"]*"/.test(svgTag)) {
+							svgTag = svgTag.replace(/\swidth="[^"]*"/, ` width="${scaledWidth}"`);
+						} else {
+							svgTag = svgTag.replace(/>$/, ` width="${scaledWidth}">`);
+						}
+						// Replace or add height
+						if (/\sheight="[^"]*"/.test(svgTag)) {
+							svgTag = svgTag.replace(/\sheight="[^"]*"/, ` height="${scaledHeight}"`);
+						} else {
+							svgTag = svgTag.replace(/>$/, ` height="${scaledHeight}">`);
+						}
+						// Remove max-width style that constrains rendering
+						svgTag = svgTag.replace(/style="[^"]*max-width:[^"]*"/, 'style=""');
+						fixedSvg = svgTag + svg.slice(svgTagMatch[1].length);
 					}
-					// Replace or add height attribute
-					if (fixedSvg.match(/\sheight="[^"]*"/)) {
-						fixedSvg = fixedSvg.replace(/\sheight="[^"]*"/, ` height="${scaledHeight}"`);
-					} else {
-						// No height attr — add one after width
-						fixedSvg = fixedSvg.replace(/\swidth="/, ` height="${scaledHeight}" width="`);
-					}
-					// Remove max-width style constraint that mermaid adds
-					fixedSvg = fixedSvg.replace(/style="max-width:[^"]*"/, `style=""`);
-					console.log(`[MermaidPNG] Step 3 - Fixed SVG dimensions (${fixedSvg.length} chars)`);
+					console.log(`[MermaidPNG] Step 3 - Fixed root <svg> dimensions (${fixedSvg.length} chars)`);
 
 					// Step 4: Rasterize SVG to PNG.
 					// createImageBitmap with a Blob is the most reliable path in
