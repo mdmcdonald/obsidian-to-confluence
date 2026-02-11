@@ -48,59 +48,60 @@ export class MermaidElectronPNGRenderer implements MermaidRenderer {
 				document.body.appendChild(container);
 
 				try {
-					// Step 1: Render mermaid to SVG.
-					// mermaid.render() inserts the SVG into the container AND returns
-					// the SVG as a string. The string may contain HTML-isms (unescaped
-					// & in labels, foreignObject, etc.) that are not valid XML. To get
-					// clean SVG XML, we use the DOM element + XMLSerializer instead.
-					await mermaid.render(chartId, chart.data);
+					// Step 1: Render mermaid to SVG string
+					const { svg } = await mermaid.render(chartId, chart.data);
+					console.log(`[MermaidPNG] Step 1 - SVG produced (${svg.length} chars)`);
 
-					// Get the SVG element from the DOM — mermaid inserts it into
-					// the container or as a sibling. Try both.
-					let svgElement = container.querySelector('svg');
-					if (!svgElement) {
-						// mermaid v11+ may insert as a sibling using the chartId
-						svgElement = document.querySelector(`#${CSS.escape(chartId)}`);
+					// Step 2: Extract dimensions from viewBox and compute scaled size
+					const viewBoxMatch = svg.match(/viewBox="([^"]+)"/);
+					let width = 800;
+					let height = 600;
+					if (viewBoxMatch) {
+						const parts = viewBoxMatch[1].split(/\s+/).map(Number);
+						if (parts.length === 4 && parts[2] > 0 && parts[3] > 0) {
+							width = parts[2];
+							height = parts[3];
+						}
 					}
-					if (!svgElement || svgElement.tagName.toLowerCase() !== 'svg') {
-						// Last resort: mermaid sometimes creates a wrapper with d- prefix
-						svgElement = document.querySelector(`svg#${CSS.escape(chartId)}`) ||
-							document.querySelector(`[id^="d${chartId}"] svg`) ||
-							document.querySelector(`svg[id*="${chartId.slice(-8)}"]`);
-					}
-
-					if (!svgElement) {
-						throw new Error("mermaid.render() succeeded but SVG element not found in DOM");
-					}
-					console.log(`[MermaidPNG] Step 1 - SVG element found (tagName: ${svgElement.tagName})`);
-
-					// Step 2: Extract dimensions from viewBox
-					const viewBox = (svgElement as SVGSVGElement).viewBox?.baseVal;
-					let width = viewBox && viewBox.width > 0 ? viewBox.width : 800;
-					let height = viewBox && viewBox.height > 0 ? viewBox.height : 600;
 					const scaledWidth = Math.ceil(width * scale);
 					const scaledHeight = Math.ceil(height * scale);
 					console.log(`[MermaidPNG] Step 2 - Dimensions: ${width}x${height} -> ${scaledWidth}x${scaledHeight}`);
 
-					// Step 3: Set explicit pixel dimensions on the SVG element
-					// (replaces width="100%" / missing height) and remove max-width
-					svgElement.setAttribute('width', String(scaledWidth));
-					svgElement.setAttribute('height', String(scaledHeight));
-					svgElement.removeAttribute('style');
+					// Step 3: Fix SVG dimensions on the root <svg> element only.
+					// Mermaid outputs width="100%" and no height attribute, which
+					// prevents createImageBitmap from determining intrinsic size.
+					// We extract and modify just the opening <svg ...> tag to avoid
+					// corrupting width/height attributes on child elements.
+					const svgTagMatch = svg.match(/^(<svg\s[^>]*>)/);
+					let fixedSvg = svg;
+					if (svgTagMatch) {
+						let svgTag = svgTagMatch[1];
+						// Replace or add width
+						if (/\swidth="[^"]*"/.test(svgTag)) {
+							svgTag = svgTag.replace(/\swidth="[^"]*"/, ` width="${scaledWidth}"`);
+						} else {
+							svgTag = svgTag.replace(/>$/, ` width="${scaledWidth}">`);
+						}
+						// Replace or add height
+						if (/\sheight="[^"]*"/.test(svgTag)) {
+							svgTag = svgTag.replace(/\sheight="[^"]*"/, ` height="${scaledHeight}"`);
+						} else {
+							svgTag = svgTag.replace(/>$/, ` height="${scaledHeight}">`);
+						}
+						// Remove max-width style that constrains rendering
+						svgTag = svgTag.replace(/style="[^"]*max-width:[^"]*"/, 'style=""');
+						fixedSvg = svgTag + svg.slice(svgTagMatch[1].length);
+					}
+					console.log(`[MermaidPNG] Step 3 - Fixed root <svg> dimensions (${fixedSvg.length} chars)`);
 
-					// Serialize to valid SVG XML via XMLSerializer.
-					// This properly escapes &, handles namespaces, and strips
-					// any HTML-only constructs that would break image loading.
-					const serializer = new XMLSerializer();
-					const cleanSvg = serializer.serializeToString(svgElement);
-					console.log(`[MermaidPNG] Step 3 - Serialized SVG XML (${cleanSvg.length} chars)`);
-
-					// Step 4: Rasterize SVG to PNG
-					const blob = new Blob([cleanSvg], { type: 'image/svg+xml;charset=utf-8' });
+					// Step 4: Rasterize SVG to PNG.
+					// createImageBitmap with a Blob is the most reliable path in
+					// Electron — it avoids <img> security restrictions (tainted canvas,
+					// blocked onload) that plague both data: and blob: URL approaches.
+					const blob = new Blob([fixedSvg], { type: 'image/svg+xml;charset=utf-8' });
 
 					let pngBuffer: Buffer;
 					try {
-						// Primary: createImageBitmap (no <img> security issues)
 						const bitmap = await createImageBitmap(blob);
 						console.log(`[MermaidPNG] Step 4a - ImageBitmap: ${bitmap.width}x${bitmap.height}`);
 
@@ -118,10 +119,12 @@ export class MermaidElectronPNGRenderer implements MermaidRenderer {
 						pngBuffer = Buffer.from(arrayBuf);
 						console.log(`[MermaidPNG] Step 4b - PNG: ${pngBuffer.length} bytes`);
 					} catch (bitmapErr) {
-						// Fallback: data URL + Image + Canvas
+						// Fallback: URI-encoded data URL + Image + Canvas.
+						// Data URLs are same-origin so canvas won't be tainted
+						// (unlike blob: URLs which caused SecurityError).
 						console.warn(`[MermaidPNG] createImageBitmap failed, trying data URL fallback:`, bitmapErr);
 
-						const dataUrl = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(cleanSvg)}`;
+						const dataUrl = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(fixedSvg)}`;
 						pngBuffer = await new Promise<Buffer>((resolve, reject) => {
 							const timeout = setTimeout(() => {
 								reject(new Error("Image load timed out after 10s"));
@@ -144,7 +147,7 @@ export class MermaidElectronPNGRenderer implements MermaidRenderer {
 
 									const pngDataUrl = canvas.toDataURL('image/png');
 									const base64 = pngDataUrl.split(',')[1];
-									console.log(`[MermaidPNG] Fallback - PNG: ${base64.length} base64 chars`);
+									console.log(`[MermaidPNG] Fallback - PNG data URL: ${pngDataUrl.length} chars`);
 									resolve(Buffer.from(base64, 'base64'));
 								} catch (err) { reject(err); }
 							};
@@ -166,11 +169,6 @@ export class MermaidElectronPNGRenderer implements MermaidRenderer {
 				} finally {
 					if (container.parentNode) {
 						document.body.removeChild(container);
-					}
-					// Also clean up any mermaid elements that escaped the container
-					const orphan = document.querySelector(`#${CSS.escape(chartId)}`);
-					if (orphan && orphan.parentNode) {
-						orphan.parentNode.removeChild(orphan);
 					}
 				}
 
