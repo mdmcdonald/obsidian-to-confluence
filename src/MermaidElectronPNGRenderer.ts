@@ -52,7 +52,7 @@ export class MermaidElectronPNGRenderer implements MermaidRenderer {
 					const { svg } = await mermaid.render(chartId, chart.data);
 					console.log(`[MermaidPNG] Step 1 - SVG produced (${svg.length} chars)`);
 
-					// Step 2: Extract dimensions from viewBox
+					// Step 2: Extract dimensions from viewBox and compute scaled size
 					const viewBoxMatch = svg.match(/viewBox="([^"]+)"/);
 					let width = 800;
 					let height = 600;
@@ -67,22 +67,35 @@ export class MermaidElectronPNGRenderer implements MermaidRenderer {
 					const scaledHeight = Math.ceil(height * scale);
 					console.log(`[MermaidPNG] Step 2 - Dimensions: ${width}x${height} -> ${scaledWidth}x${scaledHeight}`);
 
-					// Step 3: Rasterize SVG to PNG using Blob + createImageBitmap.
-					// The previous approach (base64 data URL + new Image()) silently
-					// fails — onload never fires for mermaid SVGs because they contain
-					// embedded <style> blocks with CSS that the <img> security context
-					// rejects. createImageBitmap with a Blob bypasses this restriction.
-					const blob = new Blob([svg], { type: 'image/svg+xml;charset=utf-8' });
-					console.log(`[MermaidPNG] Step 3 - Created SVG Blob (${blob.size} bytes)`);
+					// Step 3: Fix SVG dimensions. Mermaid outputs width="100%" and
+					// height="null" which prevents both createImageBitmap and <img>
+					// from determining intrinsic size. Replace with explicit pixels.
+					let fixedSvg = svg;
+					// Replace width attribute (handles 100%, null, or any value)
+					if (fixedSvg.match(/\swidth="[^"]*"/)) {
+						fixedSvg = fixedSvg.replace(/\swidth="[^"]*"/, ` width="${scaledWidth}"`);
+					}
+					// Replace or add height attribute
+					if (fixedSvg.match(/\sheight="[^"]*"/)) {
+						fixedSvg = fixedSvg.replace(/\sheight="[^"]*"/, ` height="${scaledHeight}"`);
+					} else {
+						// No height attr — add one after width
+						fixedSvg = fixedSvg.replace(/\swidth="/, ` height="${scaledHeight}" width="`);
+					}
+					// Remove max-width style constraint that mermaid adds
+					fixedSvg = fixedSvg.replace(/style="max-width:[^"]*"/, `style=""`);
+					console.log(`[MermaidPNG] Step 3 - Fixed SVG dimensions (${fixedSvg.length} chars)`);
+
+					// Step 4: Rasterize SVG to PNG.
+					// createImageBitmap with a Blob is the most reliable path in
+					// Electron — it avoids <img> security restrictions (tainted canvas,
+					// blocked onload) that plague both data: and blob: URL approaches.
+					const blob = new Blob([fixedSvg], { type: 'image/svg+xml;charset=utf-8' });
 
 					let pngBuffer: Buffer;
 					try {
-						// Primary method: createImageBitmap (handles full SVG features)
-						const bitmap = await createImageBitmap(blob, {
-							resizeWidth: scaledWidth,
-							resizeHeight: scaledHeight,
-						});
-						console.log(`[MermaidPNG] Step 4a - ImageBitmap created: ${bitmap.width}x${bitmap.height}`);
+						const bitmap = await createImageBitmap(blob);
+						console.log(`[MermaidPNG] Step 4a - ImageBitmap: ${bitmap.width}x${bitmap.height}`);
 
 						const canvas = new OffscreenCanvas(scaledWidth, scaledHeight);
 						const ctx = canvas.getContext('2d');
@@ -96,46 +109,46 @@ export class MermaidElectronPNGRenderer implements MermaidRenderer {
 						const pngBlob = await canvas.convertToBlob({ type: 'image/png' });
 						const arrayBuf = await pngBlob.arrayBuffer();
 						pngBuffer = Buffer.from(arrayBuf);
-						console.log(`[MermaidPNG] Step 4b - OffscreenCanvas PNG: ${pngBuffer.length} bytes`);
+						console.log(`[MermaidPNG] Step 4b - PNG: ${pngBuffer.length} bytes`);
 					} catch (bitmapErr) {
-						// Fallback: Blob URL + Image element + regular Canvas
-						console.warn(`[MermaidPNG] createImageBitmap failed, trying Blob URL fallback:`, bitmapErr);
-						const url = URL.createObjectURL(blob);
-						try {
-							pngBuffer = await new Promise<Buffer>((resolve, reject) => {
-								const timeout = setTimeout(() => {
-									reject(new Error("Image load timed out after 10s"));
-								}, 10000);
+						// Fallback: URI-encoded data URL + Image + Canvas.
+						// Data URLs are same-origin so canvas won't be tainted
+						// (unlike blob: URLs which caused SecurityError).
+						console.warn(`[MermaidPNG] createImageBitmap failed, trying data URL fallback:`, bitmapErr);
 
-								const img = new Image();
-								img.onload = () => {
-									clearTimeout(timeout);
-									try {
-										console.log(`[MermaidPNG] Fallback - Image loaded: ${img.naturalWidth}x${img.naturalHeight}`);
-										const canvas = document.createElement('canvas');
-										canvas.width = scaledWidth;
-										canvas.height = scaledHeight;
-										const ctx = canvas.getContext('2d');
-										if (!ctx) { reject(new Error("No 2d context")); return; }
+						const dataUrl = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(fixedSvg)}`;
+						pngBuffer = await new Promise<Buffer>((resolve, reject) => {
+							const timeout = setTimeout(() => {
+								reject(new Error("Image load timed out after 10s"));
+							}, 10000);
 
-										ctx.fillStyle = '#ffffff';
-										ctx.fillRect(0, 0, scaledWidth, scaledHeight);
-										ctx.drawImage(img, 0, 0, scaledWidth, scaledHeight);
+							const img = new Image();
+							img.onload = () => {
+								clearTimeout(timeout);
+								try {
+									console.log(`[MermaidPNG] Fallback - Image loaded: ${img.naturalWidth}x${img.naturalHeight}`);
+									const canvas = document.createElement('canvas');
+									canvas.width = scaledWidth;
+									canvas.height = scaledHeight;
+									const ctx = canvas.getContext('2d');
+									if (!ctx) { reject(new Error("No 2d context")); return; }
 
-										const pngDataUrl = canvas.toDataURL('image/png');
-										const base64 = pngDataUrl.split(',')[1];
-										resolve(Buffer.from(base64, 'base64'));
-									} catch (err) { reject(err); }
-								};
-								img.onerror = (e) => {
-									clearTimeout(timeout);
-									reject(new Error(`Image load failed: ${e instanceof ErrorEvent ? e.message : String(e)}`));
-								};
-								img.src = url;
-							});
-						} finally {
-							URL.revokeObjectURL(url);
-						}
+									ctx.fillStyle = '#ffffff';
+									ctx.fillRect(0, 0, scaledWidth, scaledHeight);
+									ctx.drawImage(img, 0, 0, scaledWidth, scaledHeight);
+
+									const pngDataUrl = canvas.toDataURL('image/png');
+									const base64 = pngDataUrl.split(',')[1];
+									console.log(`[MermaidPNG] Fallback - PNG data URL: ${pngDataUrl.length} chars`);
+									resolve(Buffer.from(base64, 'base64'));
+								} catch (err) { reject(err); }
+							};
+							img.onerror = (e) => {
+								clearTimeout(timeout);
+								reject(new Error(`Image load failed: ${e instanceof ErrorEvent ? e.message : String(e)}`));
+							};
+							img.src = dataUrl;
+						});
 					}
 
 					if (pngBuffer.length > 0) {
