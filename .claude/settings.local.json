@@ -1,0 +1,25 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:markdown-confluence.com)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(curl:*)",
+      "WebFetch(domain:api.github.com)",
+      "Bash(npm ls:*)",
+      "Bash(npm install:*)",
+      "Bash(dir:*)",
+      "Bash(npx tsc:*)",
+      "Bash(node esbuild.config.mjs:*)",
+      "Bash(git status:*)",
+      "Bash(python -c:*)",
+      "Bash(cmd //c \"dir /a nul\")",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "Bash(npm run build:*)",
+      "Bash(node -e:*)",
+      "WebSearch"
+    ]
+  }
+}
