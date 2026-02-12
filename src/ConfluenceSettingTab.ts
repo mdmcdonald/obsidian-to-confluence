@@ -150,7 +150,7 @@ export class ConfluenceSettingTab extends PluginSettingTab {
 		new Setting(containerEl)
 			.setName("Folder to publish")
 			.setDesc(
-				"Publish all files except notes that are excluded using YAML Frontmatter",
+				"Folder to publish from. Leave empty to publish the entire vault.",
 			)
 			.addText((text) =>
 				text

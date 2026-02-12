@@ -235,12 +235,6 @@ export default class ConfluencePlugin extends Plugin {
 				return;
 			}
 
-			// Check if folder to publish is configured
-			if (!this.settings.folderToPublish) {
-				new Notice("Please configure 'Folder to Publish' in plugin settings");
-				return;
-			}
-
 			this.isSyncing = true;
 			try {
 				const stats = await this.doPublish();
@@ -330,11 +324,6 @@ export default class ConfluencePlugin extends Plugin {
 			checkCallback: (checking: boolean) => {
 				if (!this.isSyncing) {
 					if (!checking) {
-						// Check if folder to publish is configured
-						if (!this.settings.folderToPublish) {
-							new Notice("Please configure 'Folder to Publish' in plugin settings");
-							return false;
-						}
 						this.isSyncing = true;
 						this.doPublish()
 							.then((stats) => {
