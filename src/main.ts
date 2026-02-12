@@ -225,6 +225,10 @@ export default class ConfluencePlugin extends Plugin {
 	override async onload() {
 		await this.init();
 
+		// Default to keeping pages in place on republish.
+		// Users can set `connie-dont-change-parent-page: false` to opt into moving.
+		ConfluencePageConfig.conniePerPageConfig.dontChangeParentPageId.default = true;
+
 		this.addRibbonIcon("cloud", "Publish to Confluence", async () => {
 			if (this.isSyncing) {
 				new Notice("Syncing already on going");
