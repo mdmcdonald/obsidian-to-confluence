@@ -200,19 +200,6 @@ export class MyBaseClient implements Client {
 				}
 			}
 
-			// Data Center: don't send ancestors on page updates — the library
-			// always includes them which moves pages to match the vault folder
-			// structure. On DC, pages should stay wherever they are.
-			if (
-				this.urlSuffix === "/rest" &&
-				requestConfig.method?.toUpperCase() === "PUT" &&
-				requestConfig.url?.match(/^\/api\/content\/[^/]+\/?$/) &&
-				requestConfig.data?.ancestors
-			) {
-				console.log("[Confluence API] Data Center: stripping ancestors from page update to prevent page move");
-				delete requestConfig.data.ancestors;
-			}
-
 			// Data Center does not support PUT on /child/attachment (returns 405).
 			// The confluence.js library uses PUT for createOrUpdateAttachments,
 			// which works on Cloud but not DC. We track the original method so
