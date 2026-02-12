@@ -145,7 +145,14 @@ export default class ConfluencePlugin extends Plugin {
 
 		const confluenceClient = this.getConfluenceClient();
 
-		const settingsLoader = new StaticSettingsLoader(this.settings);
+		// The library's SettingsLoader.validateSettings rejects empty
+		// folderToPublish, but we allow it to mean "publish everything".
+		// Pass a placeholder to satisfy validation; the adaptor uses
+		// this.settings directly where startsWith("") matches all paths.
+		const loaderSettings = !this.settings.folderToPublish
+			? { ...this.settings, folderToPublish: "/" }
+			: this.settings;
+		const settingsLoader = new StaticSettingsLoader(loaderSettings);
 		this.publisher = new Publisher(
 			this.adaptor,
 			settingsLoader,
