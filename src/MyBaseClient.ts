@@ -200,9 +200,24 @@ export class MyBaseClient implements Client {
 				}
 			}
 
+			// Data Center: don't send ancestors on page updates — the library
+			// always includes them which moves pages to match the vault folder
+			// structure. On DC, pages should stay wherever they are.
+			if (
+				this.urlSuffix === "/rest" &&
+				requestConfig.method?.toUpperCase() === "PUT" &&
+				requestConfig.url?.match(/^\/api\/content\/[^/]+\/?$/) &&
+				requestConfig.data?.ancestors
+			) {
+				console.log("[Confluence API] Data Center: stripping ancestors from page update to prevent page move");
+				delete requestConfig.data.ancestors;
+			}
+
 			// Data Center does not support PUT on /child/attachment (returns 405).
 			// The confluence.js library uses PUT for createOrUpdateAttachments,
-			// which works on Cloud but not DC. Change to POST for DC.
+			// which works on Cloud but not DC. We track the original method so
+			// we can handle "duplicate filename" errors with a retry.
+			let isRewrittenAttachmentPost = false;
 			if (
 				this.urlSuffix === "/rest" &&
 				requestConfig.method?.toUpperCase() === "PUT" &&
@@ -210,6 +225,7 @@ export class MyBaseClient implements Client {
 			) {
 				console.log("[Confluence API] Data Center: rewriting PUT to POST for attachment upload");
 				requestConfig.method = "POST";
+				isRewrittenAttachmentPost = true;
 			}
 
 			const contentType = (requestConfig.headers ?? {})[
@@ -328,8 +344,125 @@ export class MyBaseClient implements Client {
 				}
 			}
 
+			const callbackResponseHandler =
+				callback && ((data: T): void => callback(null, data));
+			const defaultResponseHandler = (data: T): T => data;
+			const responseHandler =
+				callbackResponseHandler ?? defaultResponseHandler;
+
+			// Helper: post-process response data (polyfill container, track
+			// filenames, call middlewares) and return via responseHandler.
+			// eslint-disable-next-line @typescript-eslint/no-explicit-any
+			const processAndReturn = (respData: any): void | T => {
+				if (requestConfig.url?.match(/\/child\/attachment/)) {
+					const pidMatch = requestConfig.url.match(/\/api\/content\/([^/]+)\/child\/attachment/);
+					if (pidMatch) {
+						const pid = pidMatch[1];
+						if (respData?.results && Array.isArray(respData.results)) {
+							for (const r of respData.results) {
+								if (r && typeof r === "object" && !r.container) {
+									r.container = { id: pid, type: "page" };
+									console.log(`[Confluence API] Polyfilled missing container on attachment ${r.id} with pageId=${pid}`);
+								}
+							}
+						}
+					}
+				}
+				this.config.middlewares?.onResponse?.(respData);
+				if (respData?.results && Array.isArray(respData.results)) {
+					for (const r of respData.results) {
+						if (r?.type === "attachment" && r?.id && r?.title) {
+							this.attachmentFileMap.set(String(r.id), String(r.title));
+							if (r?.extensions?.fileId && r.extensions.fileId !== r.id) {
+								this.attachmentFileMap.set(String(r.extensions.fileId), String(r.title));
+							}
+						}
+					}
+				}
+				return responseHandler(respData);
+			};
+
 			if (response.status >= 400) {
 				const errorBody = response.text || "(empty response)";
+
+				// Data Center: POST to /child/attachment fails with "same file name"
+				// when the attachment already exists. Cloud's PUT handles this
+				// automatically, but DC's POST only creates. Retry by finding the
+				// existing attachment and using the update-data endpoint.
+				if (
+					isRewrittenAttachmentPost &&
+					errorBody.includes("same file name")
+				) {
+					const pageIdMatch = requestConfig.url?.match(/\/api\/content\/([^/]+)\/child\/attachment/);
+					if (pageIdMatch) {
+						const pageId = pageIdMatch[1];
+						console.log(`[Confluence API] Data Center: attachment already exists, looking up existing attachments for page ${pageId}...`);
+
+						// GET existing attachments to find the matching one
+						const listUrl = `${this.config.host}${this.urlSuffix}/api/content/${pageId}/child/attachment?limit=200`;
+						const authHeader = await getAuthenticationToken(
+							this.config.authentication,
+							{ baseURL: this.config.host, url: listUrl, method: "GET" },
+						);
+						const listResponse = await requestUrl({
+							url: listUrl,
+							method: "GET",
+							headers: this.removeUndefinedProperties({
+								"User-Agent": "Obsidian.md",
+								Accept: "application/json",
+								Authorization: authHeader,
+							}),
+							throw: false,
+						});
+
+						if (listResponse.status === 200) {
+							// eslint-disable-next-line @typescript-eslint/no-explicit-any
+							const existingAttachments = listResponse.json?.results as any[];
+							if (existingAttachments) {
+								// Extract filename from error: "...same file name as an existing attachment: <filename>"
+								const filenameMatch = errorBody.match(/same file name[^:]*:\s*(.+?)(?:\s*$|")/);
+								const targetFilename = filenameMatch?.[1]?.trim();
+								const existing = targetFilename
+									? existingAttachments.find((a: { title: string }) => a.title === targetFilename)
+									: null;
+
+								if (existing?.id) {
+									console.log(`[Confluence API] Data Center: found existing attachment id=${existing.id} title="${existing.title}", updating via data endpoint`);
+
+									// Retry as POST to /child/attachment/{attachmentId}/data
+									const updateUrl = `${this.config.host}${this.urlSuffix}/api/content/${pageId}/child/attachment/${existing.id}/data`;
+									const retryResponse = await requestUrl({
+										url: updateUrl,
+										method: "POST",
+										headers: modifiedRequestConfig.headers,
+										body: modifiedRequestConfig.body,
+										contentType: modifiedRequestConfig.contentType,
+										throw: false,
+									});
+
+									if (retryResponse.status < 400) {
+										console.log(`[Confluence API] Data Center: attachment update succeeded (${retryResponse.status})`);
+										// Replace the original response and continue normal flow
+										const retryData = retryResponse.text?.trim()
+											? retryResponse.json
+											: {};
+
+										// Wrap single result in results array for consistency
+										// eslint-disable-next-line @typescript-eslint/no-explicit-any
+										const wrappedData = (retryData as any)?.results ? retryData : { results: [retryData] };
+
+										return processAndReturn(wrappedData);
+									} else {
+										console.error(`[Confluence API] Data Center: attachment update also failed (${retryResponse.status}): ${retryResponse.text?.substring(0, 500)}`);
+									}
+								} else {
+									console.warn(`[Confluence API] Data Center: could not find existing attachment matching "${targetFilename}" among ${existingAttachments.length} attachments`);
+								}
+							}
+						}
+					}
+				}
+
 				console.error(`[Confluence API] Error ${response.status}: ${errorBody.substring(0, 1000)}`);
 				throw new HTTPError(`Received a ${response.status}: ${errorBody.substring(0, 200)}`, {
 					status: response.status,
@@ -337,58 +470,12 @@ export class MyBaseClient implements Client {
 				});
 			}
 
-			const callbackResponseHandler =
-				callback && ((data: T): void => callback(null, data));
-			const defaultResponseHandler = (data: T): T => data;
-
-			const responseHandler =
-				callbackResponseHandler ?? defaultResponseHandler;
-
 			const responseData =
 				response.text && response.text.trim().length > 0
 					? response.json
 					: {};
 
-			// Data Center attachment responses may omit `container` (the parent page).
-			// Attachments.js directly accesses `container.id` to build collection names,
-			// so we must polyfill it from the request URL before returning the response.
-			if (requestConfig.url?.match(/\/child\/attachment/)) {
-				const pageIdMatch = requestConfig.url.match(/\/api\/content\/([^/]+)\/child\/attachment/);
-				if (pageIdMatch) {
-					const pageId = pageIdMatch[1];
-					// eslint-disable-next-line @typescript-eslint/no-explicit-any
-					const attachData = responseData as any;
-					if (attachData?.results && Array.isArray(attachData.results)) {
-						for (const result of attachData.results) {
-							if (result && typeof result === "object" && !result.container) {
-								result.container = { id: pageId, type: "page" };
-								console.log(`[Confluence API] Polyfilled missing container on attachment ${result.id} with pageId=${pageId}`);
-							}
-						}
-					}
-				}
-			}
-
-			this.config.middlewares?.onResponse?.(responseData);
-
-			// Track attachment filenames from upload responses so we can
-			// resolve media nodes (e.g. from MermaidRendererPlugin) that
-			// only have collection/id but no __fileName during ADF→storage conversion.
-			// eslint-disable-next-line @typescript-eslint/no-explicit-any
-			const resData = responseData as any;
-			if (resData?.results && Array.isArray(resData.results)) {
-				for (const result of resData.results) {
-					if (result?.type === "attachment" && result?.id && result?.title) {
-						this.attachmentFileMap.set(String(result.id), String(result.title));
-						// Also map by fileId if it differs from id (Cloud uses UUIDs)
-						if (result?.extensions?.fileId && result.extensions.fileId !== result.id) {
-							this.attachmentFileMap.set(String(result.extensions.fileId), String(result.title));
-						}
-					}
-				}
-			}
-
-			return responseHandler(responseData);
+			return processAndReturn(responseData);
 			// eslint-disable-next-line @typescript-eslint/no-explicit-any
 		} catch (e: any) {
 			const method = requestConfig.method?.toUpperCase() ?? "GET";
