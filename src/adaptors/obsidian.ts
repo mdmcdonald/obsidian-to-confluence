@@ -8,7 +8,25 @@ import {
 	ConfluencePageConfig,
 } from "@markdown-confluence/lib";
 import { lookup } from "mime-types";
+import SparkMD5 from "spark-md5";
 import { preprocessLatex } from "../LatexPreprocessor";
+
+export interface TitleRename {
+	filePath: string;
+	originalTitle: string;
+	renamedTitle: string;
+}
+
+function extractFirstH1(content: string): string | undefined {
+	// Skip YAML frontmatter if present
+	let body = content;
+	if (body.startsWith("---\n")) {
+		const end = body.indexOf("\n---", 4);
+		if (end > 0) body = body.substring(end + 4);
+	}
+	const m = body.match(/^[\t ]*#[\t ]+(.+?)[\t ]*$/m);
+	return m ? m[1].trim() : undefined;
+}
 
 const SUPPORTED_IMAGE_EXTENSIONS = [
 	"bmp",
@@ -39,6 +57,8 @@ export default class ObsidianAdaptor implements LoaderAdaptor {
 	app: App;
 	/** If set, getMarkdownFilesToUpload restricts to paths in this set. */
 	batchFilter: Set<string> | undefined;
+	/** Populated by computeTitleDedupMap(); applied in loadMarkdownFile(). */
+	private dedupMap: Map<string, TitleRename> = new Map();
 
 	constructor(
 		vault: Vault,
@@ -69,6 +89,69 @@ export default class ObsidianAdaptor implements LoaderAdaptor {
 			.getMarkdownFiles()
 			.filter((f) => this.isPublishable(f))
 			.map((f) => f.path);
+	}
+
+	/**
+	 * Walk every publishable file, compute its effective Confluence page title
+	 * (basename or first H1 when firstHeadingPageTitle is on), and for any
+	 * title shared by two or more files produce a unique renamed title by
+	 * appending ` (<6-char md5 of path>)`. Results stored on the adaptor and
+	 * consulted by loadMarkdownFile.
+	 *
+	 * Path-based hash is deterministic across re-publishes — the same file
+	 * always gets the same suffix.
+	 */
+	async computeTitleDedupMap(): Promise<void> {
+		this.dedupMap.clear();
+		const paths = await this.getAllPublishableFilePaths();
+
+		const titles: { path: string; title: string }[] = [];
+		for (const path of paths) {
+			const file = this.app.vault.getAbstractFileByPath(path);
+			if (!(file instanceof TFile)) continue;
+			let title = file.basename;
+			if (this.settings.firstHeadingPageTitle) {
+				try {
+					const content = await this.vault.cachedRead(file);
+					const h1 = extractFirstH1(content);
+					if (h1) title = h1;
+				} catch {
+					// fall back to basename
+				}
+			}
+			titles.push({ path, title });
+		}
+
+		const byTitle = new Map<string, { path: string; title: string }[]>();
+		for (const t of titles) {
+			const arr = byTitle.get(t.title);
+			if (arr) arr.push(t);
+			else byTitle.set(t.title, [t]);
+		}
+
+		for (const [originalTitle, group] of byTitle) {
+			if (group.length <= 1) continue;
+			for (const { path } of group) {
+				const hash = SparkMD5.hash(path).substring(0, 6);
+				this.dedupMap.set(path, {
+					filePath: path,
+					originalTitle,
+					renamedTitle: `${originalTitle} (${hash})`,
+				});
+			}
+		}
+
+		if (this.dedupMap.size > 0) {
+			console.log(`[Confluence] Deduplicating ${this.dedupMap.size} colliding page title(s)`);
+		}
+	}
+
+	getTitleRenames(): TitleRename[] {
+		return Array.from(this.dedupMap.values());
+	}
+
+	clearTitleDedupMap(): void {
+		this.dedupMap.clear();
 	}
 
 	async getMarkdownFilesToUpload(): Promise<FilesToUpload> {
@@ -110,10 +193,26 @@ export default class ObsidianAdaptor implements LoaderAdaptor {
 		// Normalize CRLF so the library's regex-based frontmatter and markdown
 		// parsing don't misbehave on Windows-saved notes.
 		contents = contents.replace(/\r\n/g, "\n");
+
+		let pageTitle = file.basename;
+		const rename = this.dedupMap.get(file.path);
+		if (rename) {
+			pageTitle = rename.renamedTitle;
+			// When firstHeadingPageTitle is on, the library overrides pageTitle
+			// using the first H1 from content. Rewrite that H1 so the library's
+			// extraction agrees with our renamed title.
+			if (this.settings.firstHeadingPageTitle) {
+				contents = contents.replace(
+					/^([\t ]*)#[\t ]+.+?[\t ]*$/m,
+					`$1# ${rename.renamedTitle.replace(/\$/g, "$$$$")}`,
+				);
+			}
+		}
+
 		contents = preprocessLatex(contents);
 
 		return {
-			pageTitle: file.basename,
+			pageTitle,
 			folderName: file.parent?.name || "",
 			absoluteFilePath: file.path,
 			fileName: file.name,

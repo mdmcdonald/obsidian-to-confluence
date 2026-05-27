@@ -9,7 +9,7 @@ import {
 } from "@markdown-confluence/lib";
 import { MermaidElectronPNGRenderer, PNGQuality } from "./MermaidElectronPNGRenderer";
 import { ConfluenceSettingTab } from "./ConfluenceSettingTab";
-import ObsidianAdaptor from "./adaptors/obsidian";
+import ObsidianAdaptor, { TitleRename } from "./adaptors/obsidian";
 import { CompletedModal } from "./CompletedModal";
 import { ObsidianConfluenceClient } from "./MyBaseClient";
 import {
@@ -27,6 +27,7 @@ export interface ObsidianPluginSettings
 	batchSize: number;
 	batchDelayMs: number;
 	debugLogging: boolean;
+	deduplicateTitles: boolean;
 }
 
 interface FailedFile {
@@ -38,6 +39,7 @@ interface UploadResults {
 	errorMessage: string | null;
 	failedFiles: FailedFile[];
 	filesUploadResult: UploadAdfFileResult[];
+	renamedFiles: TitleRename[];
 }
 
 export default class ConfluencePlugin extends Plugin {
@@ -184,6 +186,16 @@ export default class ConfluencePlugin extends Plugin {
 			? [publishFilter]
 			: await this.adaptor.getAllPublishableFilePaths();
 
+		// Pre-flight: rename any files whose effective Confluence title would
+		// collide with another publishable file. Computed against the whole
+		// vault (not just this batch) so cross-batch collisions are also
+		// resolved. Skipped entirely when the setting is off.
+		if (this.settings.deduplicateTitles) {
+			await this.adaptor.computeTitleDedupMap();
+		} else {
+			this.adaptor.clearTitleDedupMap();
+		}
+
 		const batchSize = Math.max(1, this.settings.batchSize || 20);
 		const batches: string[][] = [];
 		for (let i = 0; i < paths.length; i += batchSize) {
@@ -196,6 +208,7 @@ export default class ConfluencePlugin extends Plugin {
 			errorMessage: null,
 			failedFiles: [],
 			filesUploadResult: [],
+			renamedFiles: this.adaptor.getTitleRenames(),
 		};
 
 		if (paths.length === 0) {
@@ -281,6 +294,7 @@ export default class ConfluencePlugin extends Plugin {
 						errorMessage,
 						failedFiles: [],
 						filesUploadResult: [],
+						renamedFiles: [],
 					},
 				}).open();
 			} finally {
@@ -313,6 +327,7 @@ export default class ConfluencePlugin extends Plugin {
 										errorMessage: extractErrorMessage(error),
 										failedFiles: [],
 										filesUploadResult: [],
+										renamedFiles: [],
 									},
 								}).open();
 							})
@@ -346,6 +361,7 @@ export default class ConfluencePlugin extends Plugin {
 										errorMessage: extractErrorMessage(error),
 										failedFiles: [],
 										filesUploadResult: [],
+										renamedFiles: [],
 									},
 								}).open();
 							})
@@ -505,6 +521,7 @@ export default class ConfluencePlugin extends Plugin {
 				batchSize: 20,
 				batchDelayMs: 0,
 				debugLogging: false,
+				deduplicateTitles: true,
 			},
 			await this.loadData(),
 		);

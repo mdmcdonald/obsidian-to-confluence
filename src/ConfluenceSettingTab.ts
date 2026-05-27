@@ -124,6 +124,18 @@ export class ConfluenceSettingTab extends PluginSettingTab {
 			);
 
 		new Setting(containerEl)
+			.setName("Deduplicate page titles")
+			.setDesc("If multiple notes would publish with the same Confluence title (e.g. several README files), append a short hash to each so they can all upload. Without this, Confluence rejects duplicates and the whole batch fails. Renamed pages are listed in the upload report.")
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.plugin.settings.deduplicateTitles)
+					.onChange(async (value) => {
+						this.plugin.settings.deduplicateTitles = value;
+						await this.plugin.saveSettings();
+					}),
+			);
+
+		new Setting(containerEl)
 			.setName("Mermaid diagram quality")
 			.setDesc("PNG export quality for Mermaid diagrams (higher = better quality, larger files).")
 			.addDropdown((dropdown) => {

@@ -2,6 +2,7 @@ import { Modal, App } from "obsidian";
 import { createRoot, Root } from "react-dom/client";
 import React, { useState } from "react";
 import { UploadAdfFileResult } from "@markdown-confluence/lib";
+import { TitleRename } from "./adaptors/obsidian";
 
 export interface FailedFile {
 	fileName: string;
@@ -12,6 +13,7 @@ export interface UploadResults {
 	errorMessage: string | null;
 	failedFiles: FailedFile[];
 	filesUploadResult: UploadAdfFileResult[];
+	renamedFiles: TitleRename[];
 }
 
 export interface UploadResultsProps {
@@ -19,8 +21,9 @@ export interface UploadResultsProps {
 }
 
 const CompletedView: React.FC<UploadResultsProps> = ({ uploadResults }) => {
-	const { errorMessage, failedFiles, filesUploadResult } = uploadResults;
+	const { errorMessage, failedFiles, filesUploadResult, renamedFiles } = uploadResults;
 	const [expanded, setExpanded] = useState(false);
+	const [renamesExpanded, setRenamesExpanded] = useState(false);
 
 	const countResults = {
 		content: { same: 0, updated: 0 },
@@ -90,6 +93,32 @@ const CompletedView: React.FC<UploadResultsProps> = ({ uploadResults }) => {
 							<h3 style={{ color: hasFailures ? undefined : "#27ae60" }}>
 								{filesUploadResult.length} file(s) published successfully
 							</h3>
+						</div>
+					)}
+
+					{renamedFiles && renamedFiles.length > 0 && (
+						<div className="renamed-files" style={{ border: "1px solid #3498db", padding: "12px", borderRadius: "4px", marginBottom: "12px", backgroundColor: "rgba(52, 152, 219, 0.08)" }}>
+							<h3 style={{ color: "#3498db", marginTop: 0 }}>
+								{renamedFiles.length} file(s) renamed to avoid title collisions
+							</h3>
+							<p style={{ fontSize: "12px", marginBottom: "8px", opacity: 0.8 }}>
+								Multiple notes mapped to the same Confluence page title. Each was given a short hash suffix derived from its vault path.
+							</p>
+							<button onClick={() => setRenamesExpanded(!renamesExpanded)} style={{ marginBottom: "8px" }}>
+								{renamesExpanded ? "Hide" : "Show"} renames
+							</button>
+							{renamesExpanded && (
+								<ul style={{ listStyle: "none", padding: 0, fontSize: "12px", fontFamily: "monospace" }}>
+									{renamedFiles.map((r, index) => (
+										<li key={index} style={{ marginBottom: "6px", padding: "4px 8px", backgroundColor: "rgba(0,0,0,0.04)", borderRadius: "3px" }}>
+											<div>{r.filePath}</div>
+											<div style={{ marginLeft: "12px", opacity: 0.85 }}>
+												{r.originalTitle} → <strong>{r.renamedTitle}</strong>
+											</div>
+										</li>
+									))}
+								</ul>
+							)}
 						</div>
 					)}
 
