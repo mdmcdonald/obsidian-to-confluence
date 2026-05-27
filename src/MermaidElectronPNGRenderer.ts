@@ -109,6 +109,11 @@ export class MermaidElectronPNGRenderer implements MermaidRenderer {
 
 				try {
 					const { svg } = await mermaid.render(chartId, chart.data);
+					console.log(`[MermaidPNG] mermaid.render produced ${svg.length} chars of SVG`);
+					console.log(`[MermaidPNG] SVG preview (first 600 chars):`, svg.substring(0, 600));
+					if (/<foreignObject/.test(svg)) {
+						console.warn(`[MermaidPNG] SVG contains <foreignObject> — Electron's image decoder typically refuses these. Diagram type may need different mermaid config.`);
+					}
 
 					// Extract viewBox dimensions for explicit pixel sizing.
 					const viewBoxMatch = svg.match(/viewBox="([^"]+)"/);
