@@ -11,34 +11,22 @@ import { convertAdfToStorageFormat } from "./AdfToStorageFormat";
 
 async function getAuthenticationToken(
 	authentication: Config.Authentication | undefined,
-	requestData?: { baseURL: string; url: string; method: string },
 ): Promise<string | undefined> {
 	if (!authentication) return undefined;
 
 	// eslint-disable-next-line @typescript-eslint/no-explicit-any
-	if ((authentication as any).bearer) {
-		// eslint-disable-next-line @typescript-eslint/no-explicit-any
-		return `Bearer ${(authentication as any).bearer}`;
+	const bearer = (authentication as any).bearer;
+	if (bearer) {
+		return `Bearer ${bearer}`;
 	}
 
 	if ("basic" in authentication && authentication.basic) {
-		if (
-			"email" in authentication.basic &&
-			"apiToken" in authentication.basic
-		) {
-			const { email, apiToken } = authentication.basic;
-			return `Basic ${Buffer.from(`${email}:${apiToken}`).toString(
-				"base64",
-			)}`;
-		}
 		if (
 			"username" in authentication.basic &&
 			"password" in authentication.basic
 		) {
 			const { username, password } = authentication.basic;
-			return `Basic ${Buffer.from(`${username}:${password}`).toString(
-				"base64",
-			)}`;
+			return `Basic ${Buffer.from(`${username}:${password}`).toString("base64")}`;
 		}
 	}
 
@@ -48,19 +36,26 @@ async function getAuthenticationToken(
 const ATLASSIAN_TOKEN_CHECK_FLAG = "X-Atlassian-Token";
 const ATLASSIAN_TOKEN_CHECK_NOCHECK_VALUE = "no-check";
 
+/**
+ * Optional shape on the client config used to gate verbose logging.
+ * Set from main.ts when constructing the client.
+ */
+export interface VerbosityConfig {
+	debugLogging?: boolean;
+}
+
 export class MyBaseClient implements Client {
-	protected urlSuffix = "/wiki/rest";
+	protected readonly urlSuffix = "/rest";
 	// Maps attachment IDs (and fileIds) to filenames, populated from attachment
 	// upload responses. Used during ADF-to-storage conversion so that media nodes
 	// created by MermaidRendererPlugin (which lack __fileName) can be resolved.
 	protected attachmentFileMap: Map<string, string> = new Map();
 
-	constructor(
-		protected readonly config: Config,
-		urlSuffix?: string,
-	) {
-		if (urlSuffix) {
-			this.urlSuffix = urlSuffix;
+	constructor(protected readonly config: Config & VerbosityConfig) {}
+
+	protected debug(...args: unknown[]): void {
+		if (this.config.debugLogging) {
+			console.log(...args);
 		}
 	}
 
@@ -146,42 +141,39 @@ export class MyBaseClient implements Client {
 		try {
 			// Convert atlas_doc_format to storage (XHTML) format for content updates.
 			// The @markdown-confluence/lib Publisher sends content as atlas_doc_format,
-			// but many Confluence instances (especially Data Center) silently ignore it
-			// via REST API v1, accepting the request but leaving the page body empty.
-			// Converting to storage format locally is universally supported.
+			// but Data Center silently ignores it via REST v1, accepting the request
+			// but leaving the page body empty. Converting to storage format locally
+			// is universally supported.
 			if (
 				requestConfig.method?.toUpperCase() === "PUT" &&
 				requestConfig.url?.match(/^\/api\/content\//) &&
 				requestConfig.data?.body?.atlas_doc_format
 			) {
 				const adfBody = requestConfig.data.body.atlas_doc_format;
-				console.log("[Confluence API] Converting atlas_doc_format to storage format locally...");
-				console.log(`[Confluence API] attachmentFileMap has ${this.attachmentFileMap.size} entries:`, JSON.stringify(Object.fromEntries(this.attachmentFileMap)));
+				this.debug(`[Confluence API] Converting ADF to storage format (attachmentFileMap: ${this.attachmentFileMap.size} entries)`);
 				try {
 					const adfJson = JSON.parse(adfBody.value);
-					// Log media nodes in the ADF for debugging
-					const mediaNodes: string[] = [];
-					const findMedia = (node: unknown) => {
-						if (!node || typeof node !== "object") return;
-						const n = node as Record<string, unknown>;
-						if (n.type === "media") {
-							const a = (n.attrs ?? {}) as Record<string, unknown>;
-							mediaNodes.push(JSON.stringify({ type: a.type, id: a.id, collection: a.collection, __fileName: a.__fileName, url: a.url }));
+					if (this.config.debugLogging) {
+						const mediaNodes: string[] = [];
+						const findMedia = (node: unknown) => {
+							if (!node || typeof node !== "object") return;
+							const n = node as Record<string, unknown>;
+							if (n.type === "media") {
+								const a = (n.attrs ?? {}) as Record<string, unknown>;
+								mediaNodes.push(JSON.stringify({ type: a.type, id: a.id, collection: a.collection, __fileName: a.__fileName, url: a.url }));
+							}
+							if (Array.isArray(n.content)) {
+								for (const child of n.content) findMedia(child);
+							}
+						};
+						findMedia(adfJson);
+						if (mediaNodes.length > 0) {
+							this.debug(`[Confluence API] ADF contains ${mediaNodes.length} media node(s):`, mediaNodes.join(", "));
 						}
-						if (Array.isArray(n.content)) {
-							for (const child of n.content) findMedia(child);
-						}
-					};
-					findMedia(adfJson);
-					if (mediaNodes.length > 0) {
-						console.log(`[Confluence API] ADF contains ${mediaNodes.length} media node(s):`, mediaNodes.join(", "));
 					}
 					let storageValue = convertAdfToStorageFormat(adfJson, this.attachmentFileMap);
-					// The library hardcodes /wiki/spaces/ in content links,
-					// which is wrong for Data Center (uses /spaces/).
-					if (this.urlSuffix === "/rest") {
-						storageValue = storageValue.replace(/\/wiki\/spaces\//g, "/spaces/");
-					}
+					// The library hardcodes /wiki/spaces/ in content links; rewrite for DC.
+					storageValue = storageValue.replace(/\/wiki\/spaces\//g, "/spaces/");
 					requestConfig.data = {
 						...requestConfig.data,
 						body: {
@@ -191,10 +183,10 @@ export class MyBaseClient implements Client {
 							},
 						},
 					};
-					console.log(`[Confluence API] Converted to storage format (${storageValue.length} chars): ${storageValue.substring(0, 200)}`);
+					this.debug(`[Confluence API] Storage format (${storageValue.length} chars): ${storageValue.substring(0, 200)}`);
 				} catch (conversionError) {
 					console.warn(
-						"[Confluence API] Local ADF-to-storage conversion failed, using atlas_doc_format as fallback:",
+						"[Confluence API] Local ADF-to-storage conversion failed, falling back to atlas_doc_format:",
 						conversionError instanceof Error ? conversionError.message : String(conversionError),
 					);
 				}
@@ -202,15 +194,14 @@ export class MyBaseClient implements Client {
 
 			// Data Center does not support PUT on /child/attachment (returns 405).
 			// The confluence.js library uses PUT for createOrUpdateAttachments,
-			// which works on Cloud but not DC. We track the original method so
-			// we can handle "duplicate filename" errors with a retry.
+			// which works on Cloud but not DC. Track that we rewrote it so we
+			// can handle "duplicate filename" errors with a retry below.
 			let isRewrittenAttachmentPost = false;
 			if (
-				this.urlSuffix === "/rest" &&
 				requestConfig.method?.toUpperCase() === "PUT" &&
 				requestConfig.url?.match(/\/child\/attachment\/?$/)
 			) {
-				console.log("[Confluence API] Data Center: rewriting PUT to POST for attachment upload");
+				this.debug("[Confluence API] Rewriting PUT to POST for attachment upload");
 				requestConfig.method = "POST";
 				isRewrittenAttachmentPost = true;
 			}
@@ -233,8 +224,8 @@ export class MyBaseClient implements Client {
 			let requestBody: any[];
 			if (requestContentType.startsWith("multipart/form-data")) {
 				const formHeaders = requestConfig.data.getHeaders();
-				// Use slice to get a clean ArrayBuffer — Node.js Buffers can share
-				// a pooled ArrayBuffer, so .buffer alone may include unrelated data.
+				// slice() gives a clean ArrayBuffer — Node Buffers can share a
+				// pooled ArrayBuffer, so .buffer alone may include unrelated data.
 				const buf: Buffer = requestConfig.data.getBuffer();
 				const arrayBuffer = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
 				requestBody = [formHeaders, arrayBuffer];
@@ -260,16 +251,7 @@ export class MyBaseClient implements Client {
 						? ATLASSIAN_TOKEN_CHECK_NOCHECK_VALUE
 						: undefined,
 					...this.config.baseRequestConfig?.headers,
-					Authorization:
-						await getAuthenticationToken(
-							this.config.authentication,
-							{
-								// eslint-disable-next-line @typescript-eslint/naming-convention
-								baseURL: this.config.host,
-								url: `${this.config.host}${this.urlSuffix}`,
-								method: requestConfig.method ?? "GET",
-							},
-						),
+					Authorization: await getAuthenticationToken(this.config.authentication),
 					...requestConfig.headers,
 					"Content-Type": requestContentType,
 					...requestBody[0],
@@ -284,34 +266,31 @@ export class MyBaseClient implements Client {
 
 			const method = modifiedRequestConfig.method;
 			const url = modifiedRequestConfig.url;
-			console.log(`[Confluence API] ${method} ${url}`);
+			this.debug(`[Confluence API] ${method} ${url}`);
 
-			// Log request body for content mutations (but truncate large bodies)
-			if (requestConfig.data && (method === "PUT" || method === "POST")) {
+			if (this.config.debugLogging && requestConfig.data && (method === "PUT" || method === "POST")) {
 				const bodyStr = typeof requestBody[1] === "string" ? requestBody[1] : "(binary)";
 				const bodyPreview = bodyStr.length > 500 ? bodyStr.substring(0, 500) + `... (${bodyStr.length} chars total)` : bodyStr;
-				console.log(`[Confluence API] Request body: ${bodyPreview}`);
+				this.debug(`[Confluence API] Request body: ${bodyPreview}`);
 			}
 
 			const response = await requestUrl(modifiedRequestConfig);
 
-			console.log(`[Confluence API] Response: ${response.status} (${response.text?.length ?? 0} chars)`);
+			this.debug(`[Confluence API] Response: ${response.status} (${response.text?.length ?? 0} chars)`);
 
-			// Log response body for content update PUTs to help debug empty page issues
-			if (method === "PUT" && requestConfig.url?.match(/^\/api\/content\//)) {
+			if (this.config.debugLogging && method === "PUT" && requestConfig.url?.match(/^\/api\/content\//)) {
 				const respPreview = (response.text ?? "").substring(0, 500);
-				console.log(`[Confluence API] Update response body: ${respPreview}`);
+				this.debug(`[Confluence API] Update response body: ${respPreview}`);
 			}
 
-			// Log attachment-related responses in detail to diagnose Data Center issues
-			if (requestConfig.url?.match(/\/child\/attachment/)) {
+			if (this.config.debugLogging && requestConfig.url?.match(/\/child\/attachment/)) {
 				try {
 					const parsed = response.json;
 					if (parsed?.results && Array.isArray(parsed.results)) {
-						console.log(`[Confluence API] Attachment response: ${parsed.results.length} result(s)`);
+						this.debug(`[Confluence API] Attachment response: ${parsed.results.length} result(s)`);
 						if (parsed.results.length > 0) {
 							const first = parsed.results[0];
-							console.log(`[Confluence API] First attachment structure:`, JSON.stringify({
+							this.debug(`[Confluence API] First attachment structure:`, JSON.stringify({
 								id: first.id,
 								type: first.type,
 								title: first.title,
@@ -337,8 +316,8 @@ export class MyBaseClient implements Client {
 			const responseHandler =
 				callbackResponseHandler ?? defaultResponseHandler;
 
-			// Helper: post-process response data (polyfill container, track
-			// filenames, call middlewares) and return via responseHandler.
+			// Post-process response data (polyfill container, track filenames,
+			// call middlewares) and return via responseHandler.
 			// eslint-disable-next-line @typescript-eslint/no-explicit-any
 			const processAndReturn = (respData: any): void | T => {
 				if (requestConfig.url?.match(/\/child\/attachment/)) {
@@ -349,7 +328,7 @@ export class MyBaseClient implements Client {
 							for (const r of respData.results) {
 								if (r && typeof r === "object" && !r.container) {
 									r.container = { id: pid, type: "page" };
-									console.log(`[Confluence API] Polyfilled missing container on attachment ${r.id} with pageId=${pid}`);
+									this.debug(`[Confluence API] Polyfilled missing container on attachment ${r.id} with pageId=${pid}`);
 								}
 							}
 						}
@@ -374,8 +353,8 @@ export class MyBaseClient implements Client {
 
 				// Data Center: POST to /child/attachment fails with "same file name"
 				// when the attachment already exists. Cloud's PUT handles this
-				// automatically, but DC's POST only creates. Retry by finding the
-				// existing attachment and using the update-data endpoint.
+				// automatically. Retry by finding the existing attachment and
+				// using the update-data endpoint.
 				if (
 					isRewrittenAttachmentPost &&
 					errorBody.includes("same file name")
@@ -383,14 +362,10 @@ export class MyBaseClient implements Client {
 					const pageIdMatch = requestConfig.url?.match(/\/api\/content\/([^/]+)\/child\/attachment/);
 					if (pageIdMatch) {
 						const pageId = pageIdMatch[1];
-						console.log(`[Confluence API] Data Center: attachment already exists, looking up existing attachments for page ${pageId}...`);
+						this.debug(`[Confluence API] Attachment exists, looking up existing attachments for page ${pageId}...`);
 
-						// GET existing attachments to find the matching one
 						const listUrl = `${this.config.host}${this.urlSuffix}/api/content/${pageId}/child/attachment?limit=200`;
-						const authHeader = await getAuthenticationToken(
-							this.config.authentication,
-							{ baseURL: this.config.host, url: listUrl, method: "GET" },
-						);
+						const authHeader = await getAuthenticationToken(this.config.authentication);
 						const listResponse = await requestUrl({
 							url: listUrl,
 							method: "GET",
@@ -406,7 +381,6 @@ export class MyBaseClient implements Client {
 							// eslint-disable-next-line @typescript-eslint/no-explicit-any
 							const existingAttachments = listResponse.json?.results as any[];
 							if (existingAttachments) {
-								// Extract filename from error: "...same file name as an existing attachment: <filename>"
 								const filenameMatch = errorBody.match(/same file name[^:]*:\s*(.+?)(?:\s*$|")/);
 								const targetFilename = filenameMatch?.[1]?.trim();
 								const existing = targetFilename
@@ -414,9 +388,8 @@ export class MyBaseClient implements Client {
 									: null;
 
 								if (existing?.id) {
-									console.log(`[Confluence API] Data Center: found existing attachment id=${existing.id} title="${existing.title}", updating via data endpoint`);
+									this.debug(`[Confluence API] Found existing attachment id=${existing.id} title="${existing.title}", updating via data endpoint`);
 
-									// Retry as POST to /child/attachment/{attachmentId}/data
 									const updateUrl = `${this.config.host}${this.urlSuffix}/api/content/${pageId}/child/attachment/${existing.id}/data`;
 									const retryResponse = await requestUrl({
 										url: updateUrl,
@@ -428,8 +401,7 @@ export class MyBaseClient implements Client {
 									});
 
 									if (retryResponse.status < 400) {
-										console.log(`[Confluence API] Data Center: attachment update succeeded (${retryResponse.status})`);
-										// Replace the original response and continue normal flow
+										this.debug(`[Confluence API] Attachment update succeeded (${retryResponse.status})`);
 										const retryData = retryResponse.text?.trim()
 											? retryResponse.json
 											: {};
@@ -440,10 +412,10 @@ export class MyBaseClient implements Client {
 
 										return processAndReturn(wrappedData);
 									} else {
-										console.error(`[Confluence API] Data Center: attachment update also failed (${retryResponse.status}): ${retryResponse.text?.substring(0, 500)}`);
+										console.error(`[Confluence API] Attachment update failed (${retryResponse.status}): ${retryResponse.text?.substring(0, 500)}`);
 									}
 								} else {
-									console.warn(`[Confluence API] Data Center: could not find existing attachment matching "${targetFilename}" among ${existingAttachments.length} attachments`);
+									console.warn(`[Confluence API] Could not find existing attachment matching "${targetFilename}" among ${existingAttachments.length} attachments`);
 								}
 							}
 						}
@@ -468,7 +440,6 @@ export class MyBaseClient implements Client {
 			const method = requestConfig.method?.toUpperCase() ?? "GET";
 			const path = requestConfig.url ?? "(unknown)";
 
-			// Extract the most useful error message
 			let errorDetail = "";
 			if (e instanceof HTTPError) {
 				errorDetail = typeof e.response.data === "string"
@@ -519,8 +490,8 @@ export class ObsidianConfluenceClient
 	extends MyBaseClient
 	implements RequiredConfluenceClient
 {
-	constructor(config: Config, urlSuffix?: string) {
-		super(config, urlSuffix);
+	constructor(config: Config & VerbosityConfig) {
+		super(config);
 	}
 	content = new Api.Content(this);
 	space = new Api.Space(this);

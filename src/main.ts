@@ -1,10 +1,9 @@
-import { Plugin, Notice, MarkdownView, Workspace, loadMermaid } from "obsidian";
+import { Plugin, Notice, MarkdownView, Workspace } from "obsidian";
 import {
 	ConfluenceUploadSettings,
 	Publisher,
 	ConfluencePageConfig,
 	StaticSettingsLoader,
-	renderADFDoc,
 	MermaidRendererPlugin,
 	UploadAdfFileResult,
 } from "@markdown-confluence/lib";
@@ -18,15 +17,16 @@ import {
 	ConfluencePerPageUIValues,
 	mapFrontmatterToConfluencePerPageUIValues,
 } from "./ConfluencePerPageForm";
-import { Mermaid } from "mermaid";
 
 export interface ObsidianPluginSettings
 	extends ConfluenceUploadSettings.ConfluenceSettings {
 	mermaidQuality?: PNGQuality;  // 'low' | 'medium' | 'high', defaults to 'high'
-	isDataCenter: boolean;
 	usePersonalAccessToken: boolean;
 	accessToken: string;
 	atlassianPassword: string;
+	batchSize: number;
+	batchDelayMs: number;
+	debugLogging: boolean;
 }
 
 interface FailedFile {
@@ -58,62 +58,40 @@ export default class ConfluencePlugin extends Plugin {
 	}
 
 	getConfluenceClient(): ObsidianConfluenceClient {
-		// Determine Auth Config
-		// eslint-disable-next-line @typescript-eslint/no-explicit-any
-		let authentication: any = {};
-		if (this.settings.isDataCenter) {
-			if (this.settings.usePersonalAccessToken) {
-				authentication = {
-					bearer: this.settings.accessToken,
-				};
-			} else {
-				authentication = {
-					basic: {
-						username: this.settings.atlassianUserName,
-						password: this.settings.atlassianPassword,
-					},
-				};
-			}
-		} else {
-			authentication = {
+		const authentication = this.settings.usePersonalAccessToken
+			? { bearer: this.settings.accessToken }
+			: {
 				basic: {
-					email: this.settings.atlassianUserName,
-					apiToken: this.settings.atlassianApiToken,
+					username: this.settings.atlassianUserName,
+					password: this.settings.atlassianPassword,
 				},
 			};
-		}
 
-		// Determine URL Suffix
-		const urlSuffix = this.settings.isDataCenter ? "/rest" : "/wiki/rest";
-
-		return new ObsidianConfluenceClient(
-			{
-				host: this.settings.confluenceBaseUrl,
-				authentication: authentication,
-				middlewares: {
-					onError(e) {
-						console.error("Confluence API Error:", e);
-						if (
-							"response" in e &&
-							e.response &&
-							"data" in e.response
-						) {
-							e.message =
-								typeof e.response.data === "string"
-									? e.response.data
-									: JSON.stringify(e.response.data);
-						}
-					},
-					onResponse: (data: unknown) => {
-						if (this.settings.isDataCenter) {
-							polyfillRecursive(data);
-						}
-						return data;
-					},
+		return new ObsidianConfluenceClient({
+			host: this.settings.confluenceBaseUrl,
+			// eslint-disable-next-line @typescript-eslint/no-explicit-any
+			authentication: authentication as any,
+			debugLogging: this.settings.debugLogging,
+			middlewares: {
+				onError(e) {
+					console.error("Confluence API Error:", e);
+					if (
+						"response" in e &&
+						e.response &&
+						"data" in e.response
+					) {
+						e.message =
+							typeof e.response.data === "string"
+								? e.response.data
+								: JSON.stringify(e.response.data);
+					}
+				},
+				onResponse: (data: unknown) => {
+					polyfillRecursive(data);
+					return data;
 				},
 			},
-			urlSuffix,
-		);
+		});
 	}
 
 	async init() {
@@ -127,21 +105,11 @@ export default class ConfluencePlugin extends Plugin {
 			this.app,
 		);
 
-		// Always use PNG now - Atlassian's SVG support is garbage after 20 years
 		const quality = this.settings.mermaidQuality || "high";
-		const mermaidRenderer = new MermaidElectronPNGRenderer(quality);
+		const mermaidRenderer = new MermaidElectronPNGRenderer(quality, this);
 		const mermaidPlugin = new MermaidRendererPlugin(mermaidRenderer);
 
-		console.log(
-			`Using Electron PNG renderer (quality: ${quality}) - no external dependencies`,
-		);
-
-		console.log("Initializing Confluence client with:", {
-			host: this.settings.confluenceBaseUrl,
-			email: this.settings.atlassianUserName,
-			hasApiToken: !!this.settings.atlassianApiToken,
-			isDataCenter: this.settings.isDataCenter,
-		});
+		console.log(`[Confluence] Initializing client for ${this.settings.confluenceBaseUrl} (user: ${this.settings.atlassianUserName || "(PAT)"})`);
 
 		const confluenceClient = this.getConfluenceClient();
 
@@ -162,24 +130,20 @@ export default class ConfluencePlugin extends Plugin {
 	}
 
 
-	async doPublish(publishFilter?: string): Promise<UploadResults> {
-		console.log("[Confluence] === Starting Publish ===");
-		console.log("[Confluence] Filter:", publishFilter ?? "(all files)");
-		console.log("[Confluence] Settings:", {
-			baseUrl: this.settings.confluenceBaseUrl,
-			userName: this.settings.atlassianUserName,
-			hasApiToken: !!this.settings.atlassianApiToken,
-			folderToPublish: this.settings.folderToPublish,
-			confluenceParentId: this.settings.confluenceParentId,
-			firstHeadingPageTitle: this.settings.firstHeadingPageTitle,
-			isDataCenter: this.settings.isDataCenter,
-		});
+	/**
+	 * Publish a single batch of files. Restricts the adaptor's view to just
+	 * these files so the library's tree-resolution + publish phases don't
+	 * fan out across the entire vault.
+	 */
+	private async publishBatch(batchPaths: string[]): Promise<{
+		successes: UploadAdfFileResult[];
+		failures: FailedFile[];
+	}> {
+		this.adaptor.batchFilter = new Set(batchPaths);
+		try {
+			const adrFiles = await this.publisher.publish();
 
-		const adrFiles = await this.publisher.publish(publishFilter);
-
-		// The library hardcodes /wiki/spaces/ in page URLs, which is correct
-		// for Cloud but wrong for Data Center (which uses /spaces/).
-		if (this.settings.isDataCenter) {
+			// Library hardcodes Cloud /wiki/spaces/ in page URLs — rewrite for DC.
 			for (const result of adrFiles) {
 				if (result.successfulUploadResult) {
 					result.successfulUploadResult.adfFile.pageUrl =
@@ -189,44 +153,105 @@ export default class ConfluencePlugin extends Plugin {
 					result.node.file.pageUrl = result.node.file.pageUrl.replace("/wiki/spaces/", "/spaces/");
 				}
 			}
+
+			const successes: UploadAdfFileResult[] = [];
+			const failures: FailedFile[] = [];
+			for (const element of adrFiles) {
+				if (element.successfulUploadResult) {
+					successes.push(element.successfulUploadResult);
+					continue;
+				}
+				const reason = element.reason ?? "No Reason Provided";
+				console.error(`[Confluence] FAILED ${element.node.file.absoluteFilePath}: ${reason}`);
+				if (reason.includes("last updated by another user")) {
+					console.error(`[Confluence] Page was last updated by a different account — check that your API credentials own these pages.`);
+				}
+				if (reason.includes("outside the page tree")) {
+					console.error(`[Confluence] A page with this title already exists in a different location in Confluence.`);
+				}
+				failures.push({ fileName: element.node.file.absoluteFilePath, reason });
+			}
+			return { successes, failures };
+		} finally {
+			this.adaptor.batchFilter = undefined;
+		}
+	}
+
+	async doPublish(publishFilter?: string): Promise<UploadResults> {
+		console.log(`[Confluence] === Publish start (filter: ${publishFilter ?? "(all)"}) ===`);
+
+		const paths = publishFilter
+			? [publishFilter]
+			: await this.adaptor.getAllPublishableFilePaths();
+
+		const batchSize = Math.max(1, this.settings.batchSize || 20);
+		const batches: string[][] = [];
+		for (let i = 0; i < paths.length; i += batchSize) {
+			batches.push(paths.slice(i, i + batchSize));
 		}
 
-		console.log(`[Confluence] Publisher returned ${adrFiles.length} file result(s)`);
+		console.log(`[Confluence] Publishing ${paths.length} file(s) in ${batches.length} batch(es) of ${batchSize}`);
 
-		const returnVal: UploadResults = {
+		const aggregate: UploadResults = {
 			errorMessage: null,
 			failedFiles: [],
 			filesUploadResult: [],
 		};
 
-		adrFiles.forEach((element) => {
-			if (element.successfulUploadResult) {
-				const result = element.successfulUploadResult;
-				console.log(`[Confluence] SUCCESS: ${result.adfFile.absoluteFilePath} -> ${result.adfFile.pageUrl} (content: ${result.contentResult}, images: ${result.imageResult}, labels: ${result.labelResult})`);
-				returnVal.filesUploadResult.push(result);
-				return;
+		if (paths.length === 0) {
+			console.log(`[Confluence] === Publish Complete: nothing to publish ===`);
+			return aggregate;
+		}
+
+		const notice = new Notice("Publishing to Confluence…", 0);
+		const renderProgress = (batchIdx: number) => {
+			const done = Math.min(batchIdx * batchSize, paths.length);
+			notice.setMessage(
+				`Publishing to Confluence\nBatch ${batchIdx}/${batches.length} — ${done}/${paths.length} files (✓${aggregate.filesUploadResult.length}  ✗${aggregate.failedFiles.length})`,
+			);
+		};
+
+		try {
+			for (let i = 0; i < batches.length; i++) {
+				renderProgress(i + 1);
+				try {
+					const { successes, failures } = await this.publishBatch(batches[i]);
+					aggregate.filesUploadResult.push(...successes);
+					aggregate.failedFiles.push(...failures);
+				} catch (err) {
+					const reason = extractErrorMessage(err);
+					console.error(`[Confluence] Batch ${i + 1} threw:`, err);
+					for (const path of batches[i]) {
+						aggregate.failedFiles.push({ fileName: path, reason });
+					}
+				}
+				if (this.settings.batchDelayMs > 0 && i < batches.length - 1) {
+					await new Promise((r) => setTimeout(r, this.settings.batchDelayMs));
+				}
 			}
+		} finally {
+			notice.setMessage(
+				`Confluence publish done — ✓${aggregate.filesUploadResult.length}  ✗${aggregate.failedFiles.length}`,
+			);
+			setTimeout(() => notice.hide(), 3000);
+		}
 
-			const reason = element.reason ?? "No Reason Provided";
-			console.error(`[Confluence] FAILED: ${element.node.file.absoluteFilePath} -> ${reason}`);
+		console.log(`[Confluence] === Publish Complete: ${aggregate.filesUploadResult.length} succeeded, ${aggregate.failedFiles.length} failed ===`);
+		return aggregate;
+	}
 
-			// Log extra context for common failure modes
-			if (reason.includes("last updated by another user")) {
-				console.error(`[Confluence] This usually means the page was just created or edited by a different account. Check that your API credentials match the account that owns these pages.`);
-			}
-			if (reason.includes("outside the page tree")) {
-				console.error(`[Confluence] A page with this title already exists in a different location in Confluence.`);
-			}
-
-			returnVal.failedFiles.push({
-				fileName: element.node.file.absoluteFilePath,
-				reason,
-			});
-		});
-
-		console.log(`[Confluence] === Publish Complete: ${returnVal.filesUploadResult.length} succeeded, ${returnVal.failedFiles.length} failed ===`);
-
-		return returnVal;
+	/** Used by the settings tab "Clear cache" button. */
+	async clearMermaidCache(): Promise<number> {
+		const adapter = this.app.vault.adapter;
+		const dir = `${this.manifest.dir}/mermaid-cache`;
+		if (!(await adapter.exists(dir))) return 0;
+		const { files } = await adapter.list(dir);
+		let removed = 0;
+		for (const f of files) {
+			await adapter.remove(f);
+			removed++;
+		}
+		return removed;
 	}
 
 	override async onload() {
@@ -261,30 +286,6 @@ export default class ConfluencePlugin extends Plugin {
 			} finally {
 				this.isSyncing = false;
 			}
-		});
-
-		this.addCommand({
-			id: "adf-to-markdown",
-			name: "ADF To Markdown",
-			callback: async () => {
-				console.log("HMMMM");
-				const json = JSON.parse(
-					'{"type":"doc","content":[{"type":"paragraph","content":[{"text":"Testing","type":"text"}]}],"version":1}',
-				);
-				console.log({ json });
-
-				const confluenceClient = this.getConfluenceClient();
-				const testingPage =
-					await confluenceClient.content.getContentById({
-						id: "9732097",
-						expand: ["body.atlas_doc_format", "space"],
-					});
-				const adf = JSON.parse(
-					testingPage.body?.atlas_doc_format?.value ||
-						'{type: "doc", content:[]}',
-				);
-				renderADFDoc(adf);
-			},
 		});
 
 		this.addCommand({
@@ -497,11 +498,13 @@ export default class ConfluencePlugin extends Plugin {
 			{},
 			ConfluenceUploadSettings.DEFAULT_SETTINGS,
 			{
-				mermaidQuality: "high" as PNGQuality, // Default to high quality PNG
-				isDataCenter: false,
+				mermaidQuality: "high" as PNGQuality,
 				usePersonalAccessToken: false,
 				accessToken: "",
 				atlassianPassword: "",
+				batchSize: 20,
+				batchDelayMs: 0,
+				debugLogging: false,
 			},
 			await this.loadData(),
 		);

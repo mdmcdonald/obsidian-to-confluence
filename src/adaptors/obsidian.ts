@@ -8,6 +8,7 @@ import {
 	ConfluencePageConfig,
 } from "@markdown-confluence/lib";
 import { lookup } from "mime-types";
+import { preprocessLatex } from "../LatexPreprocessor";
 
 const SUPPORTED_IMAGE_EXTENSIONS = [
 	"bmp",
@@ -36,6 +37,8 @@ export default class ObsidianAdaptor implements LoaderAdaptor {
 	metadataCache: MetadataCache;
 	settings: ConfluenceUploadSettings.ConfluenceSettings;
 	app: App;
+	/** If set, getMarkdownFilesToUpload restricts to paths in this set. */
+	batchFilter: Set<string> | undefined;
 
 	constructor(
 		vault: Vault,
@@ -49,40 +52,37 @@ export default class ObsidianAdaptor implements LoaderAdaptor {
 		this.app = app;
 	}
 
+	private isPublishable(file: TFile): boolean {
+		if (file.path.endsWith(".excalidraw")) return false;
+		const fileFM = this.metadataCache.getCache(file.path);
+		if (!fileFM) return false;
+		const frontMatter = fileFM.frontmatter;
+		return (
+			(file.path.startsWith(this.settings.folderToPublish) &&
+				(!frontMatter || frontMatter["connie-publish"] !== false)) ||
+			(!!frontMatter && frontMatter["connie-publish"] === true)
+		);
+	}
+
+	async getAllPublishableFilePaths(): Promise<string[]> {
+		return this.vault
+			.getMarkdownFiles()
+			.filter((f) => this.isPublishable(f))
+			.map((f) => f.path);
+	}
+
 	async getMarkdownFilesToUpload(): Promise<FilesToUpload> {
-		const files = this.vault.getMarkdownFiles();
-		const filesToPublish = [];
-		for (const file of files) {
-			try {
-				if (file.path.endsWith(".excalidraw")) {
-					continue;
-				}
-
-				const fileFM = this.metadataCache.getCache(file.path);
-				if (!fileFM) {
-					throw new Error("Missing File in Metadata Cache");
-				}
-				const frontMatter = fileFM.frontmatter;
-
-				if (
-					(file.path.startsWith(this.settings.folderToPublish) &&
-						(!frontMatter ||
-							frontMatter["connie-publish"] !== false)) ||
-					(frontMatter && frontMatter["connie-publish"] === true)
-				) {
-					filesToPublish.push(file);
-				}
-			} catch {
-				//ignore
-			}
+		const filesToPublish: TFile[] = [];
+		for (const file of this.vault.getMarkdownFiles()) {
+			if (this.batchFilter && !this.batchFilter.has(file.path)) continue;
+			if (!this.isPublishable(file)) continue;
+			filesToPublish.push(file);
 		}
-		const filesToUpload = [];
 
+		const filesToUpload: MarkdownFile[] = [];
 		for (const file of filesToPublish) {
-			const markdownFile = await this.loadMarkdownFile(file.path);
-			filesToUpload.push(markdownFile);
+			filesToUpload.push(await this.loadMarkdownFile(file.path));
 		}
-
 		return filesToUpload;
 	}
 
@@ -107,11 +107,10 @@ export default class ObsidianAdaptor implements LoaderAdaptor {
 
 		let contents = await this.vault.cachedRead(file);
 
-		// Normalize Windows \r\n line endings to \n so the library's
-		// frontmatter regex and markdown parser work correctly.
+		// Normalize CRLF so the library's regex-based frontmatter and markdown
+		// parsing don't misbehave on Windows-saved notes.
 		contents = contents.replace(/\r\n/g, "\n");
-
-		console.log(`[Confluence] Loaded file: ${file.path} (${contents.length} chars, frontmatter keys: ${Object.keys(parsedFrontMatter).join(", ") || "none"})`);
+		contents = preprocessLatex(contents);
 
 		return {
 			pageTitle: file.basename,

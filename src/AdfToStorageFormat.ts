@@ -24,7 +24,24 @@ function convertChildren(node: AdfNode): string {
 }
 
 function convertText(node: AdfNode): string {
-	let html = escapeHtml(node.text ?? "");
+	// Inline LaTeX: text with a `code` mark whose content is prefixed with
+	// "latex-math-inline:" was produced by LatexPreprocessor. Emit the
+	// Appfire mathinline macro and skip the normal code wrapping.
+	const rawText: string = node.text ?? "";
+	const hasCodeMark =
+		Array.isArray(node.marks) &&
+		node.marks.some((m: AdfNode) => m?.type === "code");
+	const LATEX_INLINE_PREFIX = "latex-math-inline:";
+	if (hasCodeMark && rawText.startsWith(LATEX_INLINE_PREFIX)) {
+		const eq = rawText.substring(LATEX_INLINE_PREFIX.length);
+		return (
+			`<ac:structured-macro ac:name="mathinline">` +
+			`<ac:parameter ac:name="body">${escapeHtml(eq)}</ac:parameter>` +
+			`</ac:structured-macro>`
+		);
+	}
+
+	let html = escapeHtml(rawText);
 	if (node.marks && Array.isArray(node.marks)) {
 		// Apply marks inside-out (first mark is outermost)
 		for (const mark of [...node.marks].reverse()) {
@@ -32,6 +49,12 @@ function convertText(node: AdfNode): string {
 		}
 	}
 	return html;
+}
+
+function escapeCdataEnd(text: string): string {
+	// CDATA sections terminate at "]]>". Splitting it into two CDATA sections
+	// preserves the literal bytes safely.
+	return text.replace(/]]>/g, "]]]]><![CDATA[>");
 }
 
 function applyMark(mark: AdfNode, innerHtml: string): string {
@@ -64,6 +87,17 @@ function convertCodeBlock(node: AdfNode): string {
 	const code = node.content
 		?.map((child: AdfNode) => child.text ?? "")
 		.join("") ?? "";
+
+	// Block LaTeX: language sentinel set by LatexPreprocessor. Emit the
+	// Appfire mathblock macro instead of a generic code macro.
+	if (language === "latex-math-block") {
+		return (
+			`<ac:structured-macro ac:name="mathblock">` +
+			`<ac:plain-text-body><![CDATA[${escapeCdataEnd(code)}]]></ac:plain-text-body>` +
+			`</ac:structured-macro>`
+		);
+	}
+
 	const langParam = language
 		? `<ac:parameter ac:name="language">${escapeHtml(language)}</ac:parameter>`
 		: "";

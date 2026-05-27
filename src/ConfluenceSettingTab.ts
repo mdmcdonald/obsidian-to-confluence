@@ -1,4 +1,4 @@
-import { App, Setting, PluginSettingTab } from "obsidian";
+import { App, Setting, PluginSettingTab, Notice } from "obsidian";
 import ConfluencePlugin from "./main";
 
 export class ConfluenceSettingTab extends PluginSettingTab {
@@ -15,36 +15,15 @@ export class ConfluenceSettingTab extends PluginSettingTab {
 		containerEl.empty();
 
 		containerEl.createEl("h2", {
-			text: "Settings for connecting to Atlassian Confluence",
+			text: "Confluence Data Center connection",
 		});
 
 		new Setting(containerEl)
-			.setName("Use Confluence Data Center")
-			.setDesc("Enable this if you are using a self-hosted Confluence instance (Data Center or Server).")
-			.addToggle((toggle) =>
-				toggle
-					.setValue(this.plugin.settings.isDataCenter)
-					.onChange(async (value) => {
-						this.plugin.settings.isDataCenter = value;
-						await this.plugin.saveSettings();
-						this.display();
-					}),
-			);
-
-		new Setting(containerEl)
-			.setName("Confluence Domain")
-			.setDesc(
-				this.plugin.settings.isDataCenter
-				? 'Base URL of your Confluence instance (e.g. "https://confluence.mycompany.com"). Do NOT include "/wiki" or "/rest".'
-				: 'Confluence Cloud Domain (e.g. "https://mysite.atlassian.net")'
-			)
+			.setName("Confluence base URL")
+			.setDesc('Base URL of your Confluence instance, e.g. "https://confluence.mycompany.com". Do NOT include "/wiki" or "/rest".')
 			.addText((text) =>
 				text
-					.setPlaceholder(
-						this.plugin.settings.isDataCenter
-						? "https://confluence.mycompany.com"
-						: "https://mysite.atlassian.net"
-					)
+					.setPlaceholder("https://confluence.mycompany.com")
 					.setValue(this.plugin.settings.confluenceBaseUrl)
 					.onChange(async (value) => {
 						this.plugin.settings.confluenceBaseUrl = value;
@@ -52,67 +31,39 @@ export class ConfluenceSettingTab extends PluginSettingTab {
 					}),
 			);
 
-		if (this.plugin.settings.isDataCenter) {
+		new Setting(containerEl)
+			.setName("Authentication method")
+			.setDesc("Use a Personal Access Token (PAT) instead of username/password.")
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.plugin.settings.usePersonalAccessToken)
+					.onChange(async (value) => {
+						this.plugin.settings.usePersonalAccessToken = value;
+						await this.plugin.saveSettings();
+						this.display();
+					}),
+			);
+
+		if (this.plugin.settings.usePersonalAccessToken) {
 			new Setting(containerEl)
-				.setName("Authentication Method")
-				.setDesc("Use Personal Access Token (PAT) instead of Username/Password.")
-				.addToggle((toggle) =>
-					toggle
-						.setValue(this.plugin.settings.usePersonalAccessToken)
+				.setName("Personal Access Token")
+				.setDesc("Your Confluence Personal Access Token.")
+				.addText((text) => {
+					text.inputEl.type = "password";
+					text.setPlaceholder("Token...")
+						.setValue(this.plugin.settings.accessToken)
 						.onChange(async (value) => {
-							this.plugin.settings.usePersonalAccessToken = value;
+							this.plugin.settings.accessToken = value;
 							await this.plugin.saveSettings();
-							this.display();
-						}),
-				);
-
-			if (this.plugin.settings.usePersonalAccessToken) {
-				new Setting(containerEl)
-					.setName("Personal Access Token")
-					.setDesc("Your Confluence Personal Access Token.")
-					.addText((text) => {
-						text.inputEl.type = "password";
-						text.setPlaceholder("Token...")
-							.setValue(this.plugin.settings.accessToken)
-							.onChange(async (value) => {
-								this.plugin.settings.accessToken = value;
-								await this.plugin.saveSettings();
-							});
-					});
-			} else {
-				new Setting(containerEl)
-					.setName("Username")
-					.setDesc("Your Confluence Username.")
-					.addText((text) =>
-						text
-							.setPlaceholder("username")
-							.setValue(this.plugin.settings.atlassianUserName)
-							.onChange(async (value) => {
-								this.plugin.settings.atlassianUserName = value;
-								await this.plugin.saveSettings();
-							}),
-					);
-
-				new Setting(containerEl)
-					.setName("Password")
-					.setDesc("Your Confluence Password.")
-					.addText((text) => {
-						text.inputEl.type = "password";
-						text.setPlaceholder("password")
-							.setValue(this.plugin.settings.atlassianPassword)
-							.onChange(async (value) => {
-								this.plugin.settings.atlassianPassword = value;
-								await this.plugin.saveSettings();
-							});
-					});
-			}
+						});
+				});
 		} else {
 			new Setting(containerEl)
-				.setName("Atlassian Username")
-				.setDesc('eg "username@domain.com"')
+				.setName("Username")
+				.setDesc("Your Confluence username.")
 				.addText((text) =>
 					text
-						.setPlaceholder("username@domain.com")
+						.setPlaceholder("username")
 						.setValue(this.plugin.settings.atlassianUserName)
 						.onChange(async (value) => {
 							this.plugin.settings.atlassianUserName = value;
@@ -121,22 +72,22 @@ export class ConfluenceSettingTab extends PluginSettingTab {
 				);
 
 			new Setting(containerEl)
-				.setName("Atlassian API Token")
-				.setDesc("")
-				.addText((text) =>
-					text
-						.setPlaceholder("")
-						.setValue(this.plugin.settings.atlassianApiToken)
+				.setName("Password")
+				.setDesc("Your Confluence password.")
+				.addText((text) => {
+					text.inputEl.type = "password";
+					text.setPlaceholder("password")
+						.setValue(this.plugin.settings.atlassianPassword)
 						.onChange(async (value) => {
-							this.plugin.settings.atlassianApiToken = value;
+							this.plugin.settings.atlassianPassword = value;
 							await this.plugin.saveSettings();
-						}),
-				);
+						});
+				});
 		}
 
 		new Setting(containerEl)
-			.setName("Confluence Parent Page ID")
-			.setDesc("Page ID to publish files under")
+			.setName("Confluence parent page ID")
+			.setDesc("Page ID under which notes are published as children.")
 			.addText((text) =>
 				text
 					.setPlaceholder("23232345645")
@@ -149,9 +100,7 @@ export class ConfluenceSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName("Folder to publish")
-			.setDesc(
-				"Folder to publish from. Leave empty to publish the entire vault.",
-			)
+			.setDesc("Folder to publish from. Leave empty to publish the entire vault.")
 			.addText((text) =>
 				text
 					.setPlaceholder("")
@@ -163,8 +112,8 @@ export class ConfluenceSettingTab extends PluginSettingTab {
 			);
 
 		new Setting(containerEl)
-			.setName("First Header Page Name")
-			.setDesc("First header replaces file name as page title")
+			.setName("First header page name")
+			.setDesc("Use the first heading as the page title instead of the filename.")
 			.addToggle((toggle) =>
 				toggle
 					.setValue(this.plugin.settings.firstHeadingPageTitle)
@@ -175,8 +124,8 @@ export class ConfluenceSettingTab extends PluginSettingTab {
 			);
 
 		new Setting(containerEl)
-			.setName("Mermaid Diagram Quality")
-			.setDesc("PNG export quality for Mermaid diagrams (higher = better quality, larger files)")
+			.setName("Mermaid diagram quality")
+			.setDesc("PNG export quality for Mermaid diagrams (higher = better quality, larger files).")
 			.addDropdown((dropdown) => {
 				dropdown
 					.addOptions({
@@ -186,10 +135,66 @@ export class ConfluenceSettingTab extends PluginSettingTab {
 					})
 					.setValue(this.plugin.settings.mermaidQuality || "high")
 					.onChange(async (value) => {
-						// @ts-expect-error
+						// @ts-expect-error narrowed by addOptions
 						this.plugin.settings.mermaidQuality = value;
 						await this.plugin.saveSettings();
 					});
 			});
+
+		containerEl.createEl("h2", { text: "Large-vault tuning" });
+
+		new Setting(containerEl)
+			.setName("Batch size")
+			.setDesc("How many files to publish concurrently per batch. The bundled library fans out without a limit on its own, so this caps fan-out. Default 20.")
+			.addText((text) =>
+				text
+					.setPlaceholder("20")
+					.setValue(String(this.plugin.settings.batchSize))
+					.onChange(async (value) => {
+						const n = parseInt(value, 10);
+						if (!Number.isFinite(n) || n < 1 || n > 100) return;
+						this.plugin.settings.batchSize = n;
+						await this.plugin.saveSettings();
+					}),
+			);
+
+		new Setting(containerEl)
+			.setName("Delay between batches (ms)")
+			.setDesc("Pause between batches. Increase if your Confluence instance rate-limits. Default 0.")
+			.addText((text) =>
+				text
+					.setPlaceholder("0")
+					.setValue(String(this.plugin.settings.batchDelayMs))
+					.onChange(async (value) => {
+						const n = parseInt(value, 10);
+						if (!Number.isFinite(n) || n < 0) return;
+						this.plugin.settings.batchDelayMs = n;
+						await this.plugin.saveSettings();
+					}),
+			);
+
+		new Setting(containerEl)
+			.setName("Debug logging")
+			.setDesc("Log every API request, response, and ADF conversion to the developer console. Off by default — keep off for large publishes.")
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.plugin.settings.debugLogging)
+					.onChange(async (value) => {
+						this.plugin.settings.debugLogging = value;
+						await this.plugin.saveSettings();
+					}),
+			);
+
+		new Setting(containerEl)
+			.setName("Mermaid cache")
+			.setDesc("Rendered Mermaid PNGs are cached on disk so unchanged diagrams aren't re-rendered. Clear this if a diagram looks wrong after editing.")
+			.addButton((btn) =>
+				btn
+					.setButtonText("Clear cache")
+					.onClick(async () => {
+						const removed = await this.plugin.clearMermaidCache();
+						new Notice(`Cleared ${removed} cached diagram(s).`);
+					}),
+			);
 	}
 }

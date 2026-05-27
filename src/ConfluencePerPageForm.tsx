@@ -1,5 +1,4 @@
 import { Modal, App, FrontMatterCache } from "obsidian";
-import ReactDOM from "react-dom";
 import { createRoot, Root } from "react-dom/client";
 import React, { useState, ChangeEvent } from "react";
 import { ConfluencePageConfig } from "@markdown-confluence/lib";
