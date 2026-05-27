@@ -86,6 +86,37 @@ export class ConfluenceSettingTab extends PluginSettingTab {
 		}
 
 		new Setting(containerEl)
+			.setName("Test connection")
+			.setDesc("Verify the base URL and credentials reach Confluence. Calls /api/user/current and reports who you're authenticated as.")
+			.addButton((btn) =>
+				btn
+					.setButtonText("Test")
+					.onClick(async () => {
+						btn.setDisabled(true).setButtonText("Testing…");
+						try {
+							const client = this.plugin.getConfluenceClient();
+							const user = await client.users.getCurrentUser();
+							// DC returns username; Cloud-shaped clients return displayName/accountId
+							const name =
+								// eslint-disable-next-line @typescript-eslint/no-explicit-any
+								(user as any).displayName ||
+								// eslint-disable-next-line @typescript-eslint/no-explicit-any
+								(user as any).username ||
+								// eslint-disable-next-line @typescript-eslint/no-explicit-any
+								(user as any).accountId ||
+								"(unknown user)";
+							new Notice(`✓ Connected as ${name}`, 5000);
+						} catch (err) {
+							const msg = err instanceof Error ? err.message : String(err);
+							new Notice(`✗ Connection failed: ${msg.substring(0, 200)}`, 8000);
+							console.error("[Confluence] Test connection failed:", err);
+						} finally {
+							btn.setDisabled(false).setButtonText("Test");
+						}
+					}),
+			);
+
+		new Setting(containerEl)
 			.setName("Confluence parent page ID")
 			.setDesc("Page ID under which notes are published as children.")
 			.addText((text) =>

@@ -28,6 +28,21 @@ export interface ObsidianPluginSettings
 	batchDelayMs: number;
 	debugLogging: boolean;
 	deduplicateTitles: boolean;
+	/** Epoch ms of last publish completion. Status-bar uses for "X min ago". */
+	lastPublishedAt?: number;
+	lastPublishSucceeded?: number;
+	lastPublishFailed?: number;
+}
+
+function humanizeMillis(ms: number): string {
+	const s = Math.floor(ms / 1000);
+	if (s < 60) return `${s}s`;
+	const m = Math.floor(s / 60);
+	if (m < 60) return `${m}m`;
+	const h = Math.floor(m / 60);
+	if (h < 24) return `${h}h`;
+	const d = Math.floor(h / 24);
+	return `${d}d`;
 }
 
 interface FailedFile {
@@ -48,6 +63,7 @@ export default class ConfluencePlugin extends Plugin {
 	workspace!: Workspace;
 	publisher!: Publisher;
 	adaptor!: ObsidianAdaptor;
+	private statusBarEl: HTMLElement | null = null;
 
 	activeLeafPath(workspace: Workspace) {
 		const activeView = workspace.getActiveViewOfType(MarkdownView);
@@ -219,9 +235,9 @@ export default class ConfluencePlugin extends Plugin {
 		const notice = new Notice("Publishing to Confluence…", 0);
 		const renderProgress = (batchIdx: number) => {
 			const done = Math.min(batchIdx * batchSize, paths.length);
-			notice.setMessage(
-				`Publishing to Confluence\nBatch ${batchIdx}/${batches.length} — ${done}/${paths.length} files (✓${aggregate.filesUploadResult.length}  ✗${aggregate.failedFiles.length})`,
-			);
+			const msg = `Batch ${batchIdx}/${batches.length} — ${done}/${paths.length} files (✓${aggregate.filesUploadResult.length}  ✗${aggregate.failedFiles.length})`;
+			notice.setMessage(`Publishing to Confluence\n${msg}`);
+			this.refreshStatusBar(`Confluence: ${msg}`);
 		};
 
 		try {
@@ -247,10 +263,85 @@ export default class ConfluencePlugin extends Plugin {
 				`Confluence publish done — ✓${aggregate.filesUploadResult.length}  ✗${aggregate.failedFiles.length}`,
 			);
 			setTimeout(() => notice.hide(), 3000);
+			await this.persistPublishState(
+				aggregate.filesUploadResult.length,
+				aggregate.failedFiles.length,
+			);
 		}
 
 		console.log(`[Confluence] === Publish Complete: ${aggregate.filesUploadResult.length} succeeded, ${aggregate.failedFiles.length} failed ===`);
 		return aggregate;
+	}
+
+	private setupStatusBar(): void {
+		this.statusBarEl = this.addStatusBarItem();
+		this.statusBarEl.addClass("confluence-status-bar");
+		this.statusBarEl.style.cursor = "pointer";
+		this.statusBarEl.setAttribute("aria-label", "Click to publish current file to Confluence");
+		this.statusBarEl.addEventListener("click", () => this.publishCurrentFromStatusBar());
+		this.refreshStatusBar();
+		// Refresh "X min ago" once a minute so the relative time stays current.
+		this.registerInterval(window.setInterval(() => this.refreshStatusBar(), 60_000));
+	}
+
+	private refreshStatusBar(override?: string): void {
+		if (!this.statusBarEl) return;
+		if (override !== undefined) {
+			this.statusBarEl.setText(override);
+			return;
+		}
+		const last = this.settings.lastPublishedAt;
+		if (!last) {
+			this.statusBarEl.setText("Confluence: never published");
+			return;
+		}
+		const ago = humanizeMillis(Date.now() - last);
+		const failed = this.settings.lastPublishFailed ?? 0;
+		const succeeded = this.settings.lastPublishSucceeded ?? 0;
+		const summary = failed > 0
+			? `✗ ${failed} failed (${succeeded} ok)`
+			: `✓ ${succeeded} ok`;
+		this.statusBarEl.setText(`Confluence: ${summary} · ${ago} ago`);
+	}
+
+	private publishCurrentFromStatusBar(): void {
+		if (this.isSyncing) {
+			new Notice("Publish already in progress");
+			return;
+		}
+		const currentPath = this.activeLeafPath(this.workspace);
+		if (!currentPath) {
+			new Notice("No active markdown file to publish");
+			return;
+		}
+		this.isSyncing = true;
+		this.doPublish(currentPath)
+			.then((stats) => {
+				new CompletedModal(this.app, { uploadResults: stats }).open();
+			})
+			.catch((error) => {
+				console.error("[Confluence] Publish from status bar failed:", error);
+				new CompletedModal(this.app, {
+					uploadResults: {
+						errorMessage: extractErrorMessage(error),
+						failedFiles: [],
+						filesUploadResult: [],
+						renamedFiles: [],
+					},
+				}).open();
+			})
+			.finally(() => {
+				this.isSyncing = false;
+			});
+	}
+
+	/** Persist publish state without re-running init() (which rebuilds the Publisher). */
+	private async persistPublishState(succeeded: number, failed: number): Promise<void> {
+		this.settings.lastPublishedAt = Date.now();
+		this.settings.lastPublishSucceeded = succeeded;
+		this.settings.lastPublishFailed = failed;
+		await this.saveData(this.settings);
+		this.refreshStatusBar();
 	}
 
 	/** Used by the settings tab "Clear cache" button. */
@@ -273,6 +364,8 @@ export default class ConfluencePlugin extends Plugin {
 		// Default to keeping pages in place on republish.
 		// Users can set `connie-dont-change-parent-page: false` to opt into moving.
 		ConfluencePageConfig.conniePerPageConfig.dontChangeParentPageId.default = true;
+
+		this.setupStatusBar();
 
 		this.addRibbonIcon("cloud", "Publish to Confluence", async () => {
 			if (this.isSyncing) {

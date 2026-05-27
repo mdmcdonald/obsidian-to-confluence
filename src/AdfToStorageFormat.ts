@@ -160,6 +160,111 @@ function convertPanel(node: AdfNode): string {
 	);
 }
 
+// Obsidian callout type → Confluence built-in panel macro name.
+// Confluence DC has info / note / tip / warning as first-class macros;
+// anything not on that list maps to the closest fit.
+const CALLOUT_TYPE_MAP: Record<string, string> = {
+	info: "info",
+	abstract: "info",
+	summary: "info",
+	tldr: "info",
+	example: "info",
+	note: "note",
+	todo: "note",
+	question: "note",
+	help: "note",
+	important: "note",
+	tip: "tip",
+	hint: "tip",
+	success: "tip",
+	check: "tip",
+	done: "tip",
+	warning: "warning",
+	caution: "warning",
+	attention: "warning",
+	failure: "warning",
+	fail: "warning",
+	missing: "warning",
+	danger: "warning",
+	error: "warning",
+	bug: "warning",
+};
+
+/**
+ * Detect an Obsidian callout encoded as a blockquote whose first paragraph
+ * starts with `[!type]` (optionally `[!type]+` / `[!type]-` for foldable,
+ * and an optional title on the same line). Returns the Confluence macro
+ * name, optional title, and a modified node tree with the marker stripped.
+ * Returns null if this isn't a callout — caller falls back to plain
+ * blockquote rendering.
+ */
+function detectCallout(blockquote: AdfNode):
+	| { macro: string; title: string | undefined; body: AdfNode }
+	| null {
+	const content = blockquote?.content;
+	if (!Array.isArray(content) || content.length === 0) return null;
+	const firstPara = content[0];
+	if (firstPara?.type !== "paragraph") return null;
+	const paraContent = firstPara.content;
+	if (!Array.isArray(paraContent) || paraContent.length === 0) return null;
+	const firstText = paraContent[0];
+	if (firstText?.type !== "text" || typeof firstText.text !== "string") return null;
+
+	// `[!type]` at the very start, optional fold marker, optional title up to newline.
+	const m = firstText.text.match(/^\[!([a-zA-Z]+)\][+-]?[\t ]*([^\n]*)/);
+	if (!m) return null;
+	const calloutType = m[1].toLowerCase();
+	const macro = CALLOUT_TYPE_MAP[calloutType];
+	if (!macro) return null;
+
+	const restOfFirstLine = m[2].trim();
+	const remainderAfterMarker = firstText.text.substring(m[0].length).replace(/^\n/, "");
+
+	// Build a body that's the blockquote stripped of the marker line.
+	let bodyFirstPara: AdfNode | null;
+	if (remainderAfterMarker.length === 0 && paraContent.length === 1) {
+		// Whole first paragraph was just the marker (title may have been on
+		// same line and is now consumed). Drop the paragraph entirely.
+		bodyFirstPara = null;
+	} else {
+		const newFirstTextNodes: AdfNode[] = [];
+		if (remainderAfterMarker.length > 0) {
+			newFirstTextNodes.push({ ...firstText, text: remainderAfterMarker });
+		}
+		bodyFirstPara = {
+			...firstPara,
+			content: [...newFirstTextNodes, ...paraContent.slice(1)],
+		};
+		// If the first paragraph still has zero content nodes after stripping,
+		// drop it (avoid emitting an empty <p></p>).
+		if (Array.isArray(bodyFirstPara.content) && bodyFirstPara.content.length === 0) {
+			bodyFirstPara = null;
+		}
+	}
+
+	const bodyContent = bodyFirstPara
+		? [bodyFirstPara, ...content.slice(1)]
+		: content.slice(1);
+
+	return {
+		macro,
+		title: restOfFirstLine.length > 0 ? restOfFirstLine : undefined,
+		body: { ...blockquote, content: bodyContent },
+	};
+}
+
+function convertCallout(macro: string, title: string | undefined, body: AdfNode): string {
+	const titleParam = title
+		? `<ac:parameter ac:name="title">${escapeHtml(title)}</ac:parameter>`
+		: "";
+	return (
+		`<ac:structured-macro ac:name="${macro}">` +
+		titleParam +
+		`<ac:rich-text-body>${convertChildren(body)}</ac:rich-text-body>` +
+		`</ac:structured-macro>`
+	);
+}
+
 function convertExpand(node: AdfNode): string {
 	const title = node.attrs?.title ?? "";
 	return (
@@ -213,8 +318,13 @@ function convertNode(node: AdfNode): string {
 			return `<ol>${convertChildren(node)}</ol>`;
 		case "listItem":
 			return `<li>${convertChildren(node)}</li>`;
-		case "blockquote":
+		case "blockquote": {
+			const callout = detectCallout(node);
+			if (callout) {
+				return convertCallout(callout.macro, callout.title, callout.body);
+			}
 			return `<blockquote>${convertChildren(node)}</blockquote>`;
+		}
 		case "codeBlock":
 			return convertCodeBlock(node);
 		case "table":
