@@ -18,85 +18,96 @@ const FALLBACK_PNG = Buffer.from([
 	0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
 ]);
 
-const SVG_NS = "http://www.w3.org/2000/svg";
+function escapeXmlText(text: string): string {
+	return text
+		.replace(/&/g, "&amp;")
+		.replace(/</g, "&lt;")
+		.replace(/>/g, "&gt;");
+}
+
+function getAttr(attrs: string, name: string): string | undefined {
+	const m = attrs.match(new RegExp(`\\b${name}="([^"]*)"`));
+	return m ? m[1] : undefined;
+}
 
 /**
- * Replace every <foreignObject> in the SVG with a native SVG <text> element
- * positioned at the same coordinates. Electron's createImageBitmap (and the
- * <img> data-URL fallback) refuse to rasterize SVGs containing foreignObject,
- * which mermaid uses to host HTML labels in most non-flowchart diagram types.
- * Bold/italic styling inside the HTML label is lost; the textual content and
- * diagram structure survive.
+ * Replace every <foreignObject> in the SVG with a native SVG <text> at the
+ * same centre. Electron's createImageBitmap and <img> data-URL paths both
+ * refuse SVGs containing foreignObject — mermaid uses it for HTML labels in
+ * most non-flowchart diagram types (sequence, class, state, ER, gantt, ...).
+ *
+ * Uses string replacement rather than DOMParser+XMLSerializer because a prior
+ * commit (b1f8021 → reverted in 50775b6) found that round-tripping the
+ * mermaid SVG through the DOM corrupted it in ways that broke rasterization.
+ * HTML styling inside labels is lost; textual content and layout survive.
  */
 function replaceForeignObjects(svg: string): string {
 	if (!svg.includes("<foreignObject")) return svg;
+	let replaced = 0;
+	const out = svg.replace(
+		/<foreignObject\b([^>]*)>([\s\S]*?)<\/foreignObject>/gi,
+		(_match, attrs: string, inner: string) => {
+			replaced++;
+			const x = parseFloat(getAttr(attrs, "x") || "0");
+			const y = parseFloat(getAttr(attrs, "y") || "0");
+			const width = parseFloat(getAttr(attrs, "width") || "0");
+			const height = parseFloat(getAttr(attrs, "height") || "0");
+			const cx = x + width / 2;
+			const cy = y + height / 2;
 
-	const parser = new DOMParser();
-	const doc = parser.parseFromString(svg, "image/svg+xml");
-	if (doc.querySelector("parsererror")) {
-		console.warn("[MermaidPNG] SVG parse failed; skipping foreignObject replacement");
-		return svg;
-	}
-
-	const foreignObjects = Array.from(doc.querySelectorAll("foreignObject"));
-	if (foreignObjects.length === 0) return svg;
-
-	for (const fo of foreignObjects) {
-		const x = parseFloat(fo.getAttribute("x") || "0");
-		const y = parseFloat(fo.getAttribute("y") || "0");
-		const width = parseFloat(fo.getAttribute("width") || "0");
-		const height = parseFloat(fo.getAttribute("height") || "0");
-
-		// Mermaid typically places one <div> per visual line. If we find
-		// multiple block-level children, treat each as a separate line.
-		// Otherwise fall back to splitting textContent on newlines.
-		const blockChildren = Array.from(
-			fo.querySelectorAll(":scope > div, :scope > p, :scope > div > div, :scope > div > p"),
-		);
-		let lines: string[];
-		if (blockChildren.length > 1) {
-			lines = blockChildren
-				.map((el) => (el.textContent || "").trim())
-				.filter((s) => s.length > 0);
-		} else {
-			lines = (fo.textContent || "")
-				.split(/\r?\n+/)
-				.map((s) => s.trim())
-				.filter((s) => s.length > 0);
-		}
-		if (lines.length === 0) lines = [""];
-
-		const textEl = doc.createElementNS(SVG_NS, "text");
-		textEl.setAttribute("text-anchor", "middle");
-		textEl.setAttribute("font-family", "sans-serif");
-		textEl.setAttribute("font-size", "14");
-
-		const cx = x + width / 2;
-		const cy = y + height / 2;
-		const lineHeight = 16;
-		const startY = cy - (lineHeight * (lines.length - 1)) / 2;
-
-		if (lines.length === 1) {
-			textEl.setAttribute("x", String(cx));
-			textEl.setAttribute("y", String(cy));
-			textEl.setAttribute("dominant-baseline", "central");
-			textEl.textContent = lines[0];
-		} else {
-			for (let i = 0; i < lines.length; i++) {
-				const tspan = doc.createElementNS(SVG_NS, "tspan");
-				tspan.setAttribute("x", String(cx));
-				tspan.setAttribute("y", String(startY + i * lineHeight));
-				tspan.textContent = lines[i];
-				textEl.appendChild(tspan);
+			// Mermaid typically wraps each visual line in a <div> or <span>.
+			// Pull each non-empty block-element text as one line; if there are
+			// no block elements, treat the whole inner as a single line.
+			const blockMatches = Array.from(
+				inner.matchAll(/<(?:div|p|span)\b[^>]*>([\s\S]*?)<\/(?:div|p|span)>/gi),
+			);
+			let lines: string[] = [];
+			if (blockMatches.length > 0) {
+				for (const m of blockMatches) {
+					const t = m[1].replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim();
+					if (t.length > 0) lines.push(t);
+				}
 			}
-		}
+			if (lines.length === 0) {
+				const flat = inner.replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim();
+				lines = flat.length > 0 ? [flat] : [""];
+			}
 
-		fo.parentNode?.replaceChild(textEl, fo);
+			const baseAttrs = `text-anchor="middle" font-family="sans-serif" font-size="14"`;
+			if (lines.length === 1) {
+				return `<text x="${cx}" y="${cy}" dominant-baseline="central" ${baseAttrs}>${escapeXmlText(lines[0])}</text>`;
+			}
+			const lineHeight = 16;
+			const startY = cy - (lineHeight * (lines.length - 1)) / 2;
+			const tspans = lines
+				.map(
+					(line, i) =>
+						`<tspan x="${cx}" y="${startY + i * lineHeight}">${escapeXmlText(line)}</tspan>`,
+				)
+				.join("");
+			return `<text ${baseAttrs}>${tspans}</text>`;
+		},
+	);
+	if (replaced > 0) {
+		console.log(`[MermaidPNG] Replaced ${replaced} foreignObject element(s) with native SVG <text>`);
 	}
+	return out;
+}
 
-	console.log(`[MermaidPNG] Replaced ${foreignObjects.length} foreignObject element(s) with native SVG <text>`);
-
-	return new XMLSerializer().serializeToString(doc);
+/**
+ * Drop any inline `background:` style that mermaid attaches to elements —
+ * the previous SVGMermaidRenderer found these caused some renderers to
+ * reject the SVG. Run before dimension fix-up.
+ */
+function stripBackgroundStyles(svg: string): string {
+	return svg.replace(/style="([^"]*)"/gi, (_m, style: string) => {
+		const cleaned = style
+			.split(";")
+			.map((s) => s.trim())
+			.filter((s) => s.length > 0 && !/^background\s*:/i.test(s))
+			.join("; ");
+		return `style="${cleaned}"`;
+	});
 }
 
 export class MermaidElectronPNGRenderer implements MermaidRenderer {
@@ -190,8 +201,9 @@ export class MermaidElectronPNGRenderer implements MermaidRenderer {
 
 				try {
 					const { svg: rawSvg } = await mermaid.render(chartId, chart.data);
-					const svg = replaceForeignObjects(rawSvg);
-					console.log(`[MermaidPNG] mermaid.render produced ${rawSvg.length} chars of SVG (post-cleanup: ${svg.length} chars)`);
+					const svgNoFo = replaceForeignObjects(rawSvg);
+					const svg = stripBackgroundStyles(svgNoFo);
+					console.log(`[MermaidPNG] mermaid.render produced ${rawSvg.length} chars (sanitised: ${svg.length} chars)`);
 
 					// Extract viewBox dimensions for explicit pixel sizing.
 					const viewBoxMatch = svg.match(/viewBox="([^"]+)"/);
@@ -227,10 +239,17 @@ export class MermaidElectronPNGRenderer implements MermaidRenderer {
 						fixedSvg = svgTag + svg.slice(svgTagMatch[1].length);
 					}
 
+					// Prepend an XML declaration for decoder compatibility. The
+					// dimension-fix regex above is anchored to `^<svg` so this
+					// has to happen AFTER that step.
+					const decoded = fixedSvg.startsWith("<?xml")
+						? fixedSvg
+						: '<?xml version="1.0" encoding="UTF-8"?>\n' + fixedSvg;
+
 					// createImageBitmap on a Blob is the most reliable raster path
 					// in Electron — avoids the tainted-canvas / blocked-onload issues
 					// of <img> with data: or blob: URLs.
-					const blob = new Blob([fixedSvg], { type: "image/svg+xml;charset=utf-8" });
+					const blob = new Blob([decoded], { type: "image/svg+xml;charset=utf-8" });
 
 					let pngBuffer: Buffer;
 					try {
@@ -249,7 +268,7 @@ export class MermaidElectronPNGRenderer implements MermaidRenderer {
 						// Fallback: URI-encoded data URL + Image + Canvas. Same-origin
 						// so the canvas doesn't taint.
 						console.warn(`[MermaidPNG] createImageBitmap failed, falling back:`, bitmapErr);
-						const dataUrl = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(fixedSvg)}`;
+						const dataUrl = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(decoded)}`;
 						pngBuffer = await new Promise<Buffer>((resolve, reject) => {
 							const timeout = setTimeout(() => reject(new Error("Image load timed out after 10s")), 10000);
 							const img = new Image();
