@@ -9,11 +9,20 @@ export interface FailedFile {
 	reason: string;
 }
 
+export interface OrphanSummary {
+	action: string;
+	ok: number;
+	failed: number;
+	ids: string[];
+}
+
 export interface UploadResults {
 	errorMessage: string | null;
 	failedFiles: FailedFile[];
 	filesUploadResult: UploadAdfFileResult[];
 	renamedFiles: TitleRename[];
+	skipped?: number;
+	orphansHandled?: OrphanSummary | null;
 }
 
 export interface UploadResultsProps {
@@ -21,7 +30,7 @@ export interface UploadResultsProps {
 }
 
 const CompletedView: React.FC<UploadResultsProps> = ({ uploadResults }) => {
-	const { errorMessage, failedFiles, filesUploadResult, renamedFiles } = uploadResults;
+	const { errorMessage, failedFiles, filesUploadResult, renamedFiles, skipped, orphansHandled } = uploadResults;
 	const [expanded, setExpanded] = useState(false);
 	const [renamesExpanded, setRenamesExpanded] = useState(false);
 
@@ -93,6 +102,32 @@ const CompletedView: React.FC<UploadResultsProps> = ({ uploadResults }) => {
 							<h3 style={{ color: hasFailures ? undefined : "#27ae60" }}>
 								{filesUploadResult.length} file(s) published successfully
 							</h3>
+						</div>
+					)}
+
+					{(skipped ?? 0) > 0 && (
+						<div className="skipped-uploads" style={{ marginBottom: "12px", opacity: 0.85 }}>
+							<h3 style={{ marginTop: 0 }}>{skipped} note(s) unchanged — skipped</h3>
+						</div>
+					)}
+
+					{orphansHandled && orphansHandled.ids.length > 0 && (
+						<div className="orphaned-pages" style={{ border: "1px solid #e67e22", padding: "12px", borderRadius: "4px", marginBottom: "12px", backgroundColor: "rgba(230, 126, 34, 0.08)" }}>
+							<h3 style={{ color: "#e67e22", marginTop: 0 }}>
+								{orphansHandled.action === "report"
+									? `${orphansHandled.ids.length} orphaned page(s) detected — not removed`
+									: orphansHandled.action === "archive"
+										? `${orphansHandled.ok} page(s) archived (source note removed)`
+										: `${orphansHandled.ok} page(s) trashed (source note removed)`}
+							</h3>
+							{orphansHandled.failed > 0 && (
+								<p style={{ fontSize: "12px", color: "#e74c3c" }}>
+									{orphansHandled.failed} could not be processed — see the developer console.
+								</p>
+							)}
+							<p style={{ fontSize: "12px", opacity: 0.7, fontFamily: "monospace" }}>
+								Page IDs: {orphansHandled.ids.join(", ")}
+							</p>
 						</div>
 					)}
 

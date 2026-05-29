@@ -10,6 +10,7 @@ import {
 import { MermaidElectronPNGRenderer, PNGQuality } from "./MermaidElectronPNGRenderer";
 import { ConfluenceSettingTab } from "./ConfluenceSettingTab";
 import ObsidianAdaptor, { TitleRename } from "./adaptors/obsidian";
+import { PublishRecord, detectOrphans, exceedsRemovalCap } from "./publishState";
 import { CompletedModal } from "./CompletedModal";
 import { ObsidianConfluenceClient } from "./MyBaseClient";
 import {
@@ -28,11 +29,28 @@ export interface ObsidianPluginSettings
 	batchDelayMs: number;
 	debugLogging: boolean;
 	deduplicateTitles: boolean;
+	/** Skip publishing notes whose rendered content is unchanged since last publish. */
+	skipUnchanged: boolean;
+	/** What to do with a Confluence page whose source note was deleted/unpublished. */
+	onDeletedNote: DeletedNoteAction;
+	/**
+	 * Safety cap: if a single full publish would remove more than this many
+	 * pages, skip removal and report instead (guards against a misconfigured
+	 * "Folder to publish" orphaning the whole space). 0 = no limit.
+	 */
+	maxDeletePerPublish: number;
+	/**
+	 * Per-path publish record (Confluence pageId + content hash) used by
+	 * skip-unchanged and deletion detection. Keyed by vault path.
+	 */
+	publishedPages: Record<string, PublishRecord>;
 	/** Epoch ms of last publish completion. Status-bar uses for "X min ago". */
 	lastPublishedAt?: number;
 	lastPublishSucceeded?: number;
 	lastPublishFailed?: number;
 }
+
+export type DeletedNoteAction = "off" | "report" | "archive" | "trash";
 
 function humanizeMillis(ms: number): string {
 	const s = Math.floor(ms / 1000);
@@ -50,11 +68,22 @@ interface FailedFile {
 	reason: string;
 }
 
+interface OrphanSummary {
+	action: DeletedNoteAction;
+	ok: number;
+	failed: number;
+	ids: string[];
+}
+
 interface UploadResults {
 	errorMessage: string | null;
 	failedFiles: FailedFile[];
 	filesUploadResult: UploadAdfFileResult[];
 	renamedFiles: TitleRename[];
+	/** Count of notes skipped as unchanged (skip-unchanged). */
+	skipped?: number;
+	/** Result of handling pages whose source note was removed, if any. */
+	orphansHandled?: OrphanSummary | null;
 }
 
 export default class ConfluencePlugin extends Plugin {
@@ -195,8 +224,9 @@ export default class ConfluencePlugin extends Plugin {
 		}
 	}
 
-	async doPublish(publishFilter?: string): Promise<UploadResults> {
-		console.log(`[Confluence] === Publish start (filter: ${publishFilter ?? "(all)"}) ===`);
+	async doPublish(publishFilter?: string, force = false): Promise<UploadResults> {
+		const fullPublish = !publishFilter;
+		console.log(`[Confluence] === Publish start (filter: ${publishFilter ?? "(all)"}${force ? ", force" : ""}) ===`);
 
 		const paths = publishFilter
 			? [publishFilter]
@@ -209,30 +239,57 @@ export default class ConfluencePlugin extends Plugin {
 		// only when the deduplicateTitles setting is on).
 		await this.adaptor.computePublishContext(this.settings.deduplicateTitles);
 
-		const batchSize = Math.max(1, this.settings.batchSize || 20);
-		const batches: string[][] = [];
-		for (let i = 0; i < paths.length; i += batchSize) {
-			batches.push(paths.slice(i, i + batchSize));
-		}
-
-		console.log(`[Confluence] Publishing ${paths.length} file(s) in ${batches.length} batch(es) of ${batchSize}`);
-
 		const aggregate: UploadResults = {
 			errorMessage: null,
 			failedFiles: [],
 			filesUploadResult: [],
 			renamedFiles: this.adaptor.getTitleRenames(),
+			skipped: 0,
+			orphansHandled: null,
 		};
 
-		if (paths.length === 0) {
-			console.log(`[Confluence] === Publish Complete: nothing to publish ===`);
-			return aggregate;
+		// Skip-unchanged: hash each candidate's rendered content and skip those
+		// matching the last publish. Only applies to a full publish — an explicit
+		// single-file publish always goes through. The hash is still computed so
+		// it can be stored after publishing.
+		const hashByPath = new Map<string, string>();
+		const publishPaths: string[] = [];
+		let skipped = 0;
+		const canSkip = fullPublish && this.settings.skipUnchanged && !force;
+		for (const path of paths) {
+			let hash: string;
+			try {
+				hash = `${await this.adaptor.computePublishHash(path)}|${this.settings.mermaidQuality || "high"}`;
+			} catch {
+				publishPaths.push(path); // can't hash → let the real publish surface the error
+				continue;
+			}
+			hashByPath.set(path, hash);
+			const prev = this.settings.publishedPages[path];
+			if (canSkip && prev?.pageId && prev.hash === hash) {
+				skipped++;
+			} else {
+				publishPaths.push(path);
+			}
 		}
+		aggregate.skipped = skipped;
+
+		const batchSize = Math.max(1, this.settings.batchSize || 20);
+		const batches: string[][] = [];
+		for (let i = 0; i < publishPaths.length; i += batchSize) {
+			batches.push(publishPaths.slice(i, i + batchSize));
+		}
+
+		console.log(`[Confluence] ${publishPaths.length} to publish, ${skipped} unchanged, in ${batches.length} batch(es) of ${batchSize}`);
+
+		// Note: we do NOT early-return when there is nothing to publish — on a
+		// full publish, reconciliation still runs so deletions are detected even
+		// if every note is unchanged (skipped) or all notes were removed.
 
 		const notice = new Notice("Publishing to Confluence…", 0);
 		const renderProgress = (batchIdx: number) => {
-			const done = Math.min(batchIdx * batchSize, paths.length);
-			const msg = `Batch ${batchIdx}/${batches.length} — ${done}/${paths.length} files (✓${aggregate.filesUploadResult.length}  ✗${aggregate.failedFiles.length})`;
+			const done = Math.min(batchIdx * batchSize, publishPaths.length);
+			const msg = `Batch ${batchIdx}/${batches.length} — ${done}/${publishPaths.length} (✓${aggregate.filesUploadResult.length} ✗${aggregate.failedFiles.length}${skipped ? ` ⏭${skipped}` : ""})`;
 			notice.setMessage(`Publishing to Confluence\n${msg}`);
 			this.refreshStatusBar(`Confluence: ${msg}`);
 		};
@@ -255,9 +312,24 @@ export default class ConfluencePlugin extends Plugin {
 					await new Promise((r) => setTimeout(r, this.settings.batchDelayMs));
 				}
 			}
+			// Update the per-path publish record (for skip-unchanged) and, on a
+			// full publish, archive/trash pages whose source note is now gone.
+			try {
+				aggregate.orphansHandled = await this.reconcilePublishState(
+					paths,
+					publishPaths,
+					hashByPath,
+					aggregate,
+					fullPublish,
+				);
+			} catch (e) {
+				console.error("[Confluence] Publish-state reconciliation failed:", e);
+			}
 		} finally {
+			const orph = aggregate.orphansHandled;
+			const orphMsg = orph && orph.ok ? `  ${orph.action === "trash" ? "🗑" : "📦"}${orph.ok}` : "";
 			notice.setMessage(
-				`Confluence publish done — ✓${aggregate.filesUploadResult.length}  ✗${aggregate.failedFiles.length}`,
+				`Confluence publish done — ✓${aggregate.filesUploadResult.length} ✗${aggregate.failedFiles.length}${skipped ? ` ⏭${skipped}` : ""}${orphMsg}`,
 			);
 			setTimeout(() => notice.hide(), 3000);
 			await this.persistPublishState(
@@ -266,8 +338,124 @@ export default class ConfluencePlugin extends Plugin {
 			);
 		}
 
-		console.log(`[Confluence] === Publish Complete: ${aggregate.filesUploadResult.length} succeeded, ${aggregate.failedFiles.length} failed ===`);
+		console.log(`[Confluence] === Publish Complete: ${aggregate.filesUploadResult.length} ok, ${aggregate.failedFiles.length} failed, ${skipped} skipped ===`);
 		return aggregate;
+	}
+
+	/**
+	 * After a publish, refresh the per-path publish record (pageId + content
+	 * hash) used by skip-unchanged, and — on a full publish — detect pages whose
+	 * source note is no longer publishable and hand them to handleOrphans.
+	 *
+	 * Orphan detection is keyed on pageId, not path, so a moved note (whose
+	 * connie-page-id travels with it) is never treated as a deletion.
+	 */
+	private async reconcilePublishState(
+		allPaths: string[],
+		publishPaths: string[],
+		hashByPath: Map<string, string>,
+		aggregate: UploadResults,
+		fullPublish: boolean,
+	): Promise<OrphanSummary | null> {
+		const next: Record<string, PublishRecord> = { ...this.settings.publishedPages };
+
+		// Authoritative pageId per successfully-published path (from the result).
+		const pageIdByPath = new Map<string, string>();
+		for (const r of aggregate.filesUploadResult) {
+			const af = r.adfFile as { absoluteFilePath?: string; pageId?: string } | undefined;
+			if (af?.absoluteFilePath && af.pageId) {
+				pageIdByPath.set(af.absoluteFilePath, String(af.pageId));
+			}
+		}
+
+		// Record successful publishes; skipped files keep their existing record;
+		// failed publishes are left untouched so they retry next time. We record
+		// the pageId even if the hash is missing (computePublishHash threw) so
+		// deletion tracking stays correct — an empty hash just never matches, so
+		// the file republishes until a real hash is captured.
+		for (const path of publishPaths) {
+			const pageId = pageIdByPath.get(path);
+			if (pageId) next[path] = { pageId, hash: hashByPath.get(path) ?? "" };
+		}
+
+		let orphansHandled: OrphanSummary | null = null;
+
+		if (fullPublish) {
+			// Safety valve: if NOTHING is publishable but pages are tracked, this
+			// is almost certainly a misconfiguration (e.g. a wrong "Folder to
+			// publish") rather than a real mass-deletion. Skip orphan handling so
+			// we never archive/trash the entire space by accident.
+			const trackedCount = Object.keys(this.settings.publishedPages).length;
+			if (allPaths.length === 0 && trackedCount > 0) {
+				console.warn(`[Confluence] 0 publishable notes found but ${trackedCount} page(s) tracked — skipping deletion to avoid mass-removal from a likely misconfiguration. Check "Folder to publish"; use "Reset publish cache" if this is intentional.`);
+				new Notice("Confluence: 0 publishable notes — skipping deletion (likely misconfiguration).");
+				this.settings.publishedPages = next;
+				return null;
+			}
+			// Detect orphaned pages (move-safe: a reused pageId is never an orphan).
+			const { kept, orphanPageIds } = detectOrphans(next, new Set(allPaths));
+
+			// Safety valve #2: a suspiciously large orphan set almost always means
+			// a misconfiguration (e.g. a "Folder to publish" typo dropping most
+			// notes) rather than a real bulk deletion. For destructive modes, skip
+			// removal and report instead — and keep the full record (no pruning)
+			// so it re-evaluates correctly once the misconfig is fixed.
+			const cap = this.settings.maxDeletePerPublish ?? 25;
+			const destructive = this.settings.onDeletedNote === "archive" || this.settings.onDeletedNote === "trash";
+			if (destructive && exceedsRemovalCap(orphanPageIds.length, cap)) {
+				console.warn(`[Confluence] ${orphanPageIds.length} orphaned page(s) exceeds the safety limit (${cap}) — NOT removing them. Check "Folder to publish"; raise "Max pages to remove per publish" (or set 0) if this is intentional. Page IDs: ${orphanPageIds.join(", ")}`);
+				new Notice(`Confluence: ${orphanPageIds.length} pages would be removed — over the safety limit of ${cap}. Skipped; see console.`, 10000);
+				this.settings.publishedPages = next;
+				return { action: "report", ok: 0, failed: orphanPageIds.length, ids: orphanPageIds };
+			}
+
+			this.settings.publishedPages = kept;
+			if (orphanPageIds.length > 0) {
+				if (this.settings.onDeletedNote === "off") {
+					console.log(`[Confluence] ${orphanPageIds.length} orphaned page(s) detected; deletion is off.`);
+				} else {
+					orphansHandled = await this.handleOrphans(orphanPageIds, this.settings.onDeletedNote);
+				}
+			}
+			return orphansHandled;
+		}
+
+		this.settings.publishedPages = next;
+		return orphansHandled;
+	}
+
+	/** Archive / trash / report Confluence pages whose source note is gone. */
+	private async handleOrphans(pageIds: string[], mode: DeletedNoteAction): Promise<OrphanSummary> {
+		if (mode === "report") {
+			console.log(`[Confluence] Orphaned page(s) (source note removed): ${pageIds.join(", ")}`);
+			new Notice(`Confluence: ${pageIds.length} orphaned page(s) — see console (deletion set to report-only)`);
+			return { action: "report", ok: 0, failed: 0, ids: pageIds };
+		}
+		const client = this.getConfluenceClient();
+		let ok = 0;
+		let failed = 0;
+		for (const id of pageIds) {
+			// Confluence page ids are positive integers; refuse anything else so a
+			// corrupted record can never target page 0 or a malformed id.
+			if (!/^[1-9][0-9]*$/.test(id)) {
+				failed++;
+				console.error(`[Confluence] Skipping orphan with invalid pageId ${JSON.stringify(id)}`);
+				continue;
+			}
+			try {
+				if (mode === "archive") {
+					await client.content.archivePages({ pages: [{ id: Number(id) }] });
+				} else {
+					await client.content.deleteContent({ id });
+				}
+				ok++;
+				console.log(`[Confluence] ${mode === "archive" ? "Archived" : "Trashed"} orphaned page ${id}`);
+			} catch (e) {
+				failed++;
+				console.error(`[Confluence] Failed to ${mode} orphaned page ${id}:`, e);
+			}
+		}
+		return { action: mode, ok, failed, ids: pageIds };
 	}
 
 	private setupStatusBar(): void {
@@ -465,6 +653,39 @@ export default class ConfluencePlugin extends Plugin {
 		});
 
 		this.addCommand({
+			id: "force-publish-all",
+			name: "Force republish all to Confluence (ignore unchanged)",
+			checkCallback: (checking: boolean) => {
+				if (!this.isSyncing) {
+					if (!checking) {
+						this.isSyncing = true;
+						this.doPublish(undefined, true)
+							.then((stats) => {
+								new CompletedModal(this.app, {
+									uploadResults: stats,
+								}).open();
+							})
+							.catch((error) => {
+								console.error("[Confluence] Force republish all failed:", error);
+								new CompletedModal(this.app, {
+									uploadResults: {
+										errorMessage: extractErrorMessage(error),
+										failedFiles: [],
+										filesUploadResult: [],
+										renamedFiles: [],
+									},
+								}).open();
+							})
+							.finally(() => {
+								this.isSyncing = false;
+							});
+					}
+				}
+				return true;
+			},
+		});
+
+		this.addCommand({
 			id: "enable-publishing",
 			name: "Enable publishing to Confluence",
 			editorCheckCallback: (checking, _editor, view) => {
@@ -612,9 +833,14 @@ export default class ConfluencePlugin extends Plugin {
 				batchDelayMs: 0,
 				debugLogging: false,
 				deduplicateTitles: true,
+				skipUnchanged: true,
+				onDeletedNote: "off" as DeletedNoteAction,
+				maxDeletePerPublish: 25,
+				publishedPages: {},
 			},
 			await this.loadData(),
 		);
+		if (!this.settings.publishedPages) this.settings.publishedPages = {};
 	}
 
 	async saveSettings() {

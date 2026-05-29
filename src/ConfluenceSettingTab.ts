@@ -184,6 +184,54 @@ export class ConfluenceSettingTab extends PluginSettingTab {
 					});
 			});
 
+		containerEl.createEl("h2", { text: "Sync behaviour" });
+
+		new Setting(containerEl)
+			.setName("Skip unchanged notes")
+			.setDesc('On "Publish All", skip notes whose rendered content is unchanged since the last publish — a big speed-up on large vaults. Use the "Force republish all" command to override. Caveats: changes to embedded images that don\'t alter the note text are not detected, and a page you delete manually in Confluence won\'t be recreated while its note is unchanged — force-republish (or reset the publish cache) in those cases.')
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.plugin.settings.skipUnchanged)
+					.onChange(async (value) => {
+						this.plugin.settings.skipUnchanged = value;
+						await this.plugin.saveSettings();
+					}),
+			);
+
+		new Setting(containerEl)
+			.setName("When a note is deleted")
+			.setDesc('On "Publish All", what to do with the Confluence page of a note that was deleted or unpublished. Archive is reversible; Trash moves it to the space trash; Report only logs without touching Confluence. Only ever acts on pages this plugin previously published.')
+			.addDropdown((dropdown) => {
+				dropdown
+					.addOptions({
+						off: "Do nothing (off)",
+						report: "Report only (log)",
+						archive: "Archive the page",
+						trash: "Move the page to trash",
+					})
+					.setValue(this.plugin.settings.onDeletedNote)
+					.onChange(async (value) => {
+						// @ts-expect-error narrowed by addOptions
+						this.plugin.settings.onDeletedNote = value;
+						await this.plugin.saveSettings();
+					});
+			});
+
+		new Setting(containerEl)
+			.setName("Max pages to remove per publish")
+			.setDesc('Safety limit: if a single "Publish All" would archive/trash more pages than this, removal is skipped and the pages are only reported (guards against a "Folder to publish" typo orphaning your whole space). Set 0 to disable the limit.')
+			.addText((text) =>
+				text
+					.setPlaceholder("25")
+					.setValue(String(this.plugin.settings.maxDeletePerPublish))
+					.onChange(async (value) => {
+						const n = parseInt(value, 10);
+						if (!Number.isFinite(n) || n < 0) return;
+						this.plugin.settings.maxDeletePerPublish = n;
+						await this.plugin.saveSettings();
+					}),
+			);
+
 		containerEl.createEl("h2", { text: "Large-vault tuning" });
 
 		new Setting(containerEl)
@@ -237,6 +285,24 @@ export class ConfluenceSettingTab extends PluginSettingTab {
 					.onClick(async () => {
 						const removed = await this.plugin.clearMermaidCache();
 						new Notice(`Cleared ${removed} cached diagram(s).`);
+					}),
+			);
+
+		new Setting(containerEl)
+			.setName("Publish cache")
+			.setDesc("Per-note record of what was published (drives skip-unchanged and deletion detection). Reset it to force a full republish; deletion tracking re-seeds from the next publish (so nothing is treated as orphaned until then).")
+			.addButton((btn) =>
+				btn
+					.setButtonText("Reset publish cache")
+					.onClick(async () => {
+						try {
+							this.plugin.settings.publishedPages = {};
+							await this.plugin.saveSettings();
+							new Notice("Publish cache reset — the next publish will re-send everything.");
+						} catch (err) {
+							console.error("[Confluence] Failed to reset publish cache:", err);
+							new Notice(`Failed to reset publish cache: ${err instanceof Error ? err.message : String(err)}`);
+						}
 					}),
 			);
 	}
