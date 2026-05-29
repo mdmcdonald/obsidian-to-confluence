@@ -73,6 +73,8 @@ interface OrphanSummary {
 	ok: number;
 	failed: number;
 	ids: string[];
+	/** pageIds actually removed (archived/trashed). Used to prune state. */
+	removed: string[];
 }
 
 interface UploadResults {
@@ -393,7 +395,12 @@ export default class ConfluencePlugin extends Plugin {
 				return null;
 			}
 			// Detect orphaned pages (move-safe: a reused pageId is never an orphan).
-			const { kept, orphanPageIds } = detectOrphans(next, new Set(allPaths));
+			const currentSet = new Set(allPaths);
+			const { kept, orphanPageIds } = detectOrphans(next, currentSet);
+			// Orphan path→record map (for retaining ones we couldn't remove).
+			const orphanEntries = Object.entries(next).filter(
+				([p, rec]) => !currentSet.has(p) && rec.pageId && orphanPageIds.includes(rec.pageId),
+			);
 
 			// Safety valve #2: a suspiciously large orphan set almost always means
 			// a misconfiguration (e.g. a "Folder to publish" typo dropping most
@@ -405,18 +412,28 @@ export default class ConfluencePlugin extends Plugin {
 			if (destructive && exceedsRemovalCap(orphanPageIds.length, cap)) {
 				console.warn(`[Confluence] ${orphanPageIds.length} orphaned page(s) exceeds the safety limit (${cap}) — NOT removing them. Check "Folder to publish"; raise "Max pages to remove per publish" (or set 0) if this is intentional. Page IDs: ${orphanPageIds.join(", ")}`);
 				new Notice(`Confluence: ${orphanPageIds.length} pages would be removed — over the safety limit of ${cap}. Skipped; see console.`, 10000);
-				this.settings.publishedPages = next;
-				return { action: "report", ok: 0, failed: orphanPageIds.length, ids: orphanPageIds };
+				this.settings.publishedPages = next; // keep everything tracked
+				return { action: "report", ok: 0, failed: orphanPageIds.length, ids: orphanPageIds, removed: [] };
 			}
 
-			this.settings.publishedPages = kept;
-			if (orphanPageIds.length > 0) {
-				if (this.settings.onDeletedNote === "off") {
-					console.log(`[Confluence] ${orphanPageIds.length} orphaned page(s) detected; deletion is off.`);
-				} else {
-					orphansHandled = await this.handleOrphans(orphanPageIds, this.settings.onDeletedNote);
+			if (orphanPageIds.length > 0 && this.settings.onDeletedNote !== "off") {
+				orphansHandled = await this.handleOrphans(orphanPageIds, this.settings.onDeletedNote);
+			} else if (orphanPageIds.length > 0) {
+				console.log(`[Confluence] ${orphanPageIds.length} orphaned page(s) detected; deletion is off.`);
+			}
+
+			// Prune state, but RETAIN any orphan whose page we did not actually
+			// remove, so it is not silently forgotten: a failed/unsupported
+			// archive is retried, and orphans seen in "report" mode persist until
+			// really removed. Only "off" drops orphan records without tracking.
+			const removed = new Set(orphansHandled?.removed ?? []);
+			const finalState = { ...kept };
+			if (this.settings.onDeletedNote !== "off") {
+				for (const [p, rec] of orphanEntries) {
+					if (!removed.has(rec.pageId)) finalState[p] = rec;
 				}
 			}
+			this.settings.publishedPages = finalState;
 			return orphansHandled;
 		}
 
@@ -429,11 +446,13 @@ export default class ConfluencePlugin extends Plugin {
 		if (mode === "report") {
 			console.log(`[Confluence] Orphaned page(s) (source note removed): ${pageIds.join(", ")}`);
 			new Notice(`Confluence: ${pageIds.length} orphaned page(s) — see console (deletion set to report-only)`);
-			return { action: "report", ok: 0, failed: 0, ids: pageIds };
+			return { action: "report", ok: 0, failed: 0, ids: pageIds, removed: [] };
 		}
 		const client = this.getConfluenceClient();
 		let ok = 0;
 		let failed = 0;
+		let archiveUnsupported = false;
+		const removed: string[] = [];
 		for (const id of pageIds) {
 			// Confluence page ids are positive integers; refuse anything else so a
 			// corrupted record can never target page 0 or a malformed id.
@@ -449,13 +468,25 @@ export default class ConfluencePlugin extends Plugin {
 					await client.content.deleteContent({ id });
 				}
 				ok++;
+				removed.push(id);
 				console.log(`[Confluence] ${mode === "archive" ? "Archived" : "Trashed"} orphaned page ${id}`);
 			} catch (e) {
 				failed++;
-				console.error(`[Confluence] Failed to ${mode} orphaned page ${id}:`, e);
+				// eslint-disable-next-line @typescript-eslint/no-explicit-any
+				const status = (e as any)?.response?.status;
+				// 405/404 on the bulk-archive endpoint means this Confluence Data
+				// Center version doesn't expose POST /rest/api/content/archive.
+				if (mode === "archive" && (status === 405 || status === 404)) {
+					archiveUnsupported = true;
+				}
+				console.error(`[Confluence] Failed to ${mode} orphaned page ${id} (status ${status ?? "?"}):`, e);
 			}
 		}
-		return { action: mode, ok, failed, ids: pageIds };
+		if (archiveUnsupported) {
+			console.warn(`[Confluence] The archive REST endpoint (POST /rest/api/content/archive) is not available on this Confluence Data Center version. Set "When a note is deleted" to "Move to trash" or "Report only".`);
+			new Notice(`Confluence: this server doesn't support the archive API — ${pageIds.length - ok} page(s) left in place. Switch "When a note is deleted" to Trash or Report.`, 12000);
+		}
+		return { action: mode, ok, failed, ids: pageIds, removed };
 	}
 
 	private setupStatusBar(): void {

@@ -200,7 +200,7 @@ export class ConfluenceSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName("When a note is deleted")
-			.setDesc('On "Publish All", what to do with the Confluence page of a note that was deleted or unpublished. Archive is reversible; Trash moves it to the space trash; Report only logs without touching Confluence. Only ever acts on pages this plugin previously published.')
+			.setDesc('On "Publish All", what to do with the Confluence page of a note that was deleted or unpublished. Archive is reversible but needs the bulk-archive REST API (newer Data Center) — if your server returns HTTP 405 it isn\'t available, so use Trash instead. Trash moves the page to the space trash; Report only logs without touching Confluence. Only ever acts on pages this plugin previously published.')
 			.addDropdown((dropdown) => {
 				dropdown
 					.addOptions({
