@@ -415,6 +415,23 @@ test("integration: comments → wikilinks → latex, in pipeline order", () => {
 	assert.ok(md.includes("`latex-math-inline:y`"), "live math encoded");
 });
 
+test("panel nodes map to DC admonition macros (info/note/warning/tip)", () => {
+	const panel = (panelType: string) =>
+		convertAdfToStorageFormat({
+			type: "doc",
+			content: [{ type: "panel", attrs: { panelType }, content: [{ type: "paragraph", content: [txt("body")] }] }],
+		});
+	assert.equal(panel("info"), `<ac:structured-macro ac:name="info"><ac:rich-text-body><p>body</p></ac:rich-text-body></ac:structured-macro>`);
+	assert.ok(panel("warning").includes(`ac:name="warning"`));
+	assert.ok(panel("note").includes(`ac:name="note"`));
+	assert.ok(panel("success").includes(`ac:name="tip"`));
+	assert.ok(panel("error").includes(`ac:name="warning"`));
+	// Library collapses tip/abstract/etc. to "custom" — degrades to info.
+	assert.ok(panel("custom").includes(`ac:name="info"`));
+	// No Cloud-style panelType parameter should be emitted.
+	assert.ok(!panel("info").includes("panelType"));
+});
+
 test("integration: a wikilink inside a comment is removed, not linked", () => {
 	let md = "keep %%[[Secret]]%% end";
 	md = preprocessComments(md);

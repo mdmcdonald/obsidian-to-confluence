@@ -308,11 +308,26 @@ function convertMedia(node: AdfNode): string {
 	return "";
 }
 
+// ADF panelType → Confluence DC admonition macro name. DC has NO generic
+// "panel" macro that understands a panelType parameter (that is Cloud/ADF
+// only) — info/note/warning/tip are separate first-class macros. The bundled
+// library pre-converts Obsidian callouts to panel nodes but collapses many
+// types (tip, abstract, todo, question, example, quote, bug, danger) to
+// "custom" before we see them, so those degrade to "info".
+const PANEL_TYPE_TO_DC_MACRO: Record<string, string> = {
+	info: "info",
+	note: "note",
+	warning: "warning",
+	error: "warning",
+	success: "tip",
+	custom: "info",
+};
+
 function convertPanel(node: AdfNode): string {
-	const panelType = node.attrs?.panelType ?? "info";
+	const panelType: string = node.attrs?.panelType ?? "info";
+	const macro = PANEL_TYPE_TO_DC_MACRO[panelType] ?? "info";
 	return (
-		`<ac:structured-macro ac:name="panel">` +
-		`<ac:parameter ac:name="panelType">${escapeHtml(panelType)}</ac:parameter>` +
+		`<ac:structured-macro ac:name="${macro}">` +
 		`<ac:rich-text-body>${convertChildren(node)}</ac:rich-text-body>` +
 		`</ac:structured-macro>`
 	);
@@ -355,6 +370,12 @@ const CALLOUT_TYPE_MAP: Record<string, string> = {
  * name, optional title, and a modified node tree with the marker stripped.
  * Returns null if this isn't a callout — caller falls back to plain
  * blockquote rendering.
+ *
+ * NB: the bundled library's own callout plugin normally pre-converts
+ * `> [!type]` blockquotes into `panel` nodes (handled by convertPanel) before
+ * we get here, so this path is a fallback. It is kept because it maps the
+ * original callout type directly (preserving e.g. `tip`, which the library
+ * otherwise collapses to a generic "custom" panel).
  */
 function detectCallout(blockquote: AdfNode):
 	| { macro: string; title: string | undefined; body: AdfNode }
