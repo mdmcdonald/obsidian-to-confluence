@@ -202,15 +202,12 @@ export default class ConfluencePlugin extends Plugin {
 			? [publishFilter]
 			: await this.adaptor.getAllPublishableFilePaths();
 
-		// Pre-flight: rename any files whose effective Confluence title would
-		// collide with another publishable file. Computed against the whole
-		// vault (not just this batch) so cross-batch collisions are also
-		// resolved. Skipped entirely when the setting is off.
-		if (this.settings.deduplicateTitles) {
-			await this.adaptor.computeTitleDedupMap();
-		} else {
-			this.adaptor.clearTitleDedupMap();
-		}
+		// Pre-flight: build the publish context against the whole vault (not just
+		// this batch). This computes the effective Confluence title for every
+		// publishable file — needed both to resolve [[wikilinks]] to the right
+		// page title and to rename any titles that would collide (the latter
+		// only when the deduplicateTitles setting is on).
+		await this.adaptor.computePublishContext(this.settings.deduplicateTitles);
 
 		const batchSize = Math.max(1, this.settings.batchSize || 20);
 		const batches: string[][] = [];

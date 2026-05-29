@@ -7,8 +7,22 @@
  * to call any Confluence API endpoint.
  */
 
+import {
+	decodeWikilink,
+	WIKILINK_SENTINEL_PREFIX,
+	WikilinkPayload,
+} from "./obsidianPreprocess";
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AdfNode = any;
+
+// Obsidian highlight ==text==. Confluence DC has no native highlight feature or
+// macro (Cloud-only), so we emit a best-effort inline span. background-color on
+// a span renders in DC but is undocumented and may be normalised/stripped on a
+// later editor round-trip; rgb() matches what Confluence's editor itself emits.
+// rgb(255,248,179) == #fff8b3, an Obsidian-yellow.
+const HIGHLIGHT_OPEN = `<span style="background-color: rgb(255,248,179)">`;
+const HIGHLIGHT_CLOSE = `</span>`;
 
 function escapeHtml(text: string): string {
 	return text
@@ -31,6 +45,17 @@ function convertText(node: AdfNode): string {
 	const hasCodeMark =
 		Array.isArray(node.marks) &&
 		node.marks.some((m: AdfNode) => m?.type === "code");
+
+	// Wikilink: an inline-code sentinel produced by preprocessWikilinks carrying
+	// the resolved Confluence page title / anchor / display. Emit an ac:link.
+	if (hasCodeMark && rawText.startsWith(WIKILINK_SENTINEL_PREFIX)) {
+		const payload = decodeWikilink(rawText);
+		if (payload) return renderWikilink(payload);
+		// Should not happen (we encode these ourselves) — surface it rather
+		// than silently emitting the raw sentinel as code.
+		console.warn(`[ADF→Storage] Failed to decode wikilink sentinel: ${rawText.slice(0, 80)}`);
+	}
+
 	const LATEX_INLINE_PREFIX = "latex-math-inline:";
 	if (hasCodeMark && rawText.startsWith(LATEX_INLINE_PREFIX)) {
 		const eq = rawText.substring(LATEX_INLINE_PREFIX.length);
@@ -57,6 +82,133 @@ function escapeCdataEnd(text: string): string {
 	return text.replace(/]]>/g, "]]]]><![CDATA[>");
 }
 
+function renderWikilink(p: WikilinkPayload): string {
+	const body = `<ac:plain-text-link-body><![CDATA[${escapeCdataEnd(p.display ?? "")}]]></ac:plain-text-link-body>`;
+	// Confluence heading auto-anchors are the heading text with whitespace
+	// removed (case + punctuation preserved) — verified against Atlassian DC
+	// docs. NB: fragile for headings with special characters, but the page
+	// link still resolves even when the anchor does not.
+	const anchorAttr = p.anchor
+		? ` ac:anchor="${escapeHtml(p.anchor.replace(/\s+/g, ""))}"`
+		: "";
+	if (p.kind === "anchor") {
+		// Same-page heading link — no <ri:page>.
+		return `<ac:link${anchorAttr}>${body}</ac:link>`;
+	}
+	return (
+		`<ac:link${anchorAttr}>` +
+		`<ri:page ri:content-title="${escapeHtml(p.title ?? "")}" />` +
+		body +
+		`</ac:link>`
+	);
+}
+
+// --- Obsidian highlight (==text==) rendering ------------------------------
+// `==` passes through the library's CommonMark parser as literal text, so the
+// markers survive into the ADF (split across sibling nodes when the highlight
+// wraps formatting, e.g. ==**bold**==). We detect them on the flattened inline
+// token stream so inner formatting is preserved.
+
+function isScannableText(node: AdfNode): boolean {
+	if (!node || node.type !== "text" || typeof node.text !== "string") return false;
+	// Highlights never apply inside inline code / our sentinels.
+	if (Array.isArray(node.marks) && node.marks.some((m: AdfNode) => m?.type === "code")) {
+		return false;
+	}
+	return true;
+}
+
+type InlineToken = { marker: true } | { marker: false; node: AdfNode };
+
+function leadingNonSpace(node: AdfNode): boolean {
+	if (node?.type === "text" && typeof node.text === "string") return /^\S/.test(node.text);
+	return true; // formatted / atomic inline node — treat as visible content
+}
+function trailingNonSpace(node: AdfNode): boolean {
+	if (node?.type === "text" && typeof node.text === "string") return /\S$/.test(node.text);
+	return true;
+}
+
+/**
+ * Render an inline content array, converting Obsidian highlight runs
+ * (==text==) into background-color spans while preserving any inner formatting.
+ *
+ * Pairing is non-nested and honours CommonMark flanking: an opening `==` must
+ * be immediately followed by a non-space character and a closing `==`
+ * immediately preceded by one, matching Obsidian's reading-view behaviour
+ * (so `== text ==` is NOT a highlight). Unpaired markers render literally.
+ */
+function convertInlineContent(content: AdfNode[] | undefined): string {
+	if (!Array.isArray(content) || content.length === 0) return "";
+
+	// 1. Flatten to tokens, splitting scannable text nodes on "==".
+	const toks: InlineToken[] = [];
+	for (const node of content) {
+		// Drop empty text nodes: they render to nothing but would break the
+		// flanking adjacency check (a "" neighbour has no leading/trailing char).
+		if (node?.type === "text" && node.text === "") continue;
+		if (!isScannableText(node)) {
+			toks.push({ marker: false, node });
+			continue;
+		}
+		const text: string = node.text;
+		let last = 0;
+		let idx = text.indexOf("==", last);
+		if (idx < 0) {
+			toks.push({ marker: false, node });
+			continue;
+		}
+		while (idx >= 0) {
+			if (idx > last) {
+				toks.push({ marker: false, node: { ...node, text: text.slice(last, idx) } });
+			}
+			toks.push({ marker: true });
+			last = idx + 2;
+			idx = text.indexOf("==", last);
+		}
+		if (last < text.length) {
+			toks.push({ marker: false, node: { ...node, text: text.slice(last) } });
+		}
+	}
+
+	// 2. Pair markers (first valid opener → next valid closer).
+	const canOpen = (i: number): boolean => {
+		const t = toks[i + 1];
+		return !!t && !t.marker && leadingNonSpace(t.node);
+	};
+	const canClose = (i: number): boolean => {
+		const t = toks[i - 1];
+		return !!t && !t.marker && trailingNonSpace(t.node);
+	};
+	const openMarkers = new Set<number>();
+	const closeMarkers = new Set<number>();
+	let pendingOpen: number | null = null;
+	for (let i = 0; i < toks.length; i++) {
+		if (!toks[i].marker) continue;
+		if (pendingOpen === null) {
+			if (canOpen(i)) pendingOpen = i;
+		} else if (canClose(i)) {
+			openMarkers.add(pendingOpen);
+			closeMarkers.add(i);
+			pendingOpen = null;
+		}
+	}
+
+	// 3. Emit.
+	let out = "";
+	for (let i = 0; i < toks.length; i++) {
+		const t = toks[i];
+		if (t.marker) {
+			if (openMarkers.has(i)) out += HIGHLIGHT_OPEN;
+			else if (closeMarkers.has(i)) out += HIGHLIGHT_CLOSE;
+			else out += "==";
+		} else {
+			out += convertNode(t.node);
+		}
+	}
+	return out;
+}
+
 function applyMark(mark: AdfNode, innerHtml: string): string {
 	switch (mark.type) {
 		case "strong":
@@ -75,8 +227,14 @@ function applyMark(mark: AdfNode, innerHtml: string): string {
 			return innerHtml;
 		case "textColor":
 			return `<span style="color: ${escapeHtml(mark.attrs?.color ?? "")}">${innerHtml}</span>`;
-		case "link":
-			return `<a href="${escapeHtml(mark.attrs?.href ?? "")}">${innerHtml}</a>`;
+		case "link": {
+			const href: string = mark.attrs?.href ?? "";
+			// A leftover "wikilinks:" href means the library parsed a [[...]] we
+			// did not preprocess — e.g. the [[...]] inside an embed ![[...]].
+			// Render as plain text rather than emit a broken anchor.
+			if (href.startsWith("wikilinks:")) return innerHtml;
+			return `<a href="${escapeHtml(href)}">${innerHtml}</a>`;
+		}
 		default:
 			return innerHtml;
 	}
@@ -291,7 +449,10 @@ function convertTableCell(tag: string, node: AdfNode): string {
 	if (attrs.colspan && attrs.colspan > 1) parts.push(` colspan="${attrs.colspan}"`);
 	if (attrs.rowspan && attrs.rowspan > 1) parts.push(` rowspan="${attrs.rowspan}"`);
 	if (attrs.background) parts.push(` style="background-color: ${escapeHtml(attrs.background)}"`);
-	return `<${tag}${parts.join("")}>${convertChildren(node)}</${tag}>`;
+	// convertInlineContent (not convertChildren) so ==highlights== render in
+	// cells too. Harmless when a cell wraps block content (paragraphs): those
+	// nodes are passed through convertNode unchanged.
+	return `<${tag}${parts.join("")}>${convertInlineContent(node.content)}</${tag}>`;
 }
 
 function convertNode(node: AdfNode): string {
@@ -301,10 +462,10 @@ function convertNode(node: AdfNode): string {
 		case "doc":
 			return convertChildren(node);
 		case "paragraph":
-			return `<p>${convertChildren(node)}</p>`;
+			return `<p>${convertInlineContent(node.content)}</p>`;
 		case "heading": {
 			const level = node.attrs?.level ?? 1;
-			return `<h${level}>${convertChildren(node)}</h${level}>`;
+			return `<h${level}>${convertInlineContent(node.content)}</h${level}>`;
 		}
 		case "text":
 			return convertText(node);
@@ -364,7 +525,7 @@ function convertNode(node: AdfNode): string {
 			return `<ul class="task-list">${convertChildren(node)}</ul>`;
 		case "taskItem": {
 			const checked = node.attrs?.state === "DONE" ? "checked " : "";
-			return `<li><ac:task><ac:task-status>${checked ? "complete" : "incomplete"}</ac:task-status><ac:task-body>${convertChildren(node)}</ac:task-body></ac:task></li>`;
+			return `<li><ac:task><ac:task-status>${checked ? "complete" : "incomplete"}</ac:task-status><ac:task-body>${convertInlineContent(node.content)}</ac:task-body></ac:task></li>`;
 		}
 		case "mention": {
 			const accountId = node.attrs?.id ?? "";
