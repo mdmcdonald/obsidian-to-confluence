@@ -167,6 +167,18 @@ export class ConfluenceSettingTab extends PluginSettingTab {
 			);
 
 		new Setting(containerEl)
+			.setName("Metadata panel")
+			.setDesc("Add a Page Properties panel at the top of each page built from the note's frontmatter (id, type, status, subject, and ontology relationships like parent / wasInfluencedBy / requires — resolved to page links where possible). Also feeds Confluence Page Properties Reports.")
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.plugin.settings.showMetadataPanel)
+					.onChange(async (value) => {
+						this.plugin.settings.showMetadataPanel = value;
+						await this.plugin.saveSettings();
+					}),
+			);
+
+		new Setting(containerEl)
 			.setName("Mermaid diagram quality")
 			.setDesc("PNG export quality for Mermaid diagrams (higher = better quality, larger files).")
 			.addDropdown((dropdown) => {

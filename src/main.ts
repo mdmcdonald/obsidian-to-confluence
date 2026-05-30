@@ -31,6 +31,8 @@ export interface ObsidianPluginSettings
 	deduplicateTitles: boolean;
 	/** Skip publishing notes whose rendered content is unchanged since last publish. */
 	skipUnchanged: boolean;
+	/** Emit a Page Properties panel from each note's frontmatter. */
+	showMetadataPanel: boolean;
 	/** What to do with a Confluence page whose source note was deleted/unpublished. */
 	onDeletedNote: DeletedNoteAction;
 	/**
@@ -153,6 +155,7 @@ export default class ConfluencePlugin extends Plugin {
 			this.settings,
 			this.app,
 		);
+		this.adaptor.showMetadataPanel = this.settings.showMetadataPanel;
 
 		const quality = this.settings.mermaidQuality || "high";
 		const mermaidRenderer = new MermaidElectronPNGRenderer(quality, this);
@@ -865,6 +868,7 @@ export default class ConfluencePlugin extends Plugin {
 				debugLogging: false,
 				deduplicateTitles: true,
 				skipUnchanged: true,
+				showMetadataPanel: true,
 				onDeletedNote: "off" as DeletedNoteAction,
 				maxDeletePerPublish: 25,
 				publishedPages: {},

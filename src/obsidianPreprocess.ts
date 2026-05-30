@@ -32,6 +32,24 @@ export function preprocessComments(md: string): string {
 }
 
 // ---------------------------------------------------------------------------
+// Table cells: a cell whose content starts with ">" (e.g. "| >= 0.95 |") is
+// mis-parsed as a blockquote, dropping the ">" and indenting the value. Escape
+// a ">" that begins a cell so it stays literal. Common in engineering tables
+// (thresholds like ">= 0.95", "> 100 km").
+// ---------------------------------------------------------------------------
+
+export function preprocessTableCells(md: string): string {
+	return transformText(md, (text) =>
+		text
+			.split("\n")
+			.map((line) =>
+				/\|.*\|/.test(line) ? line.replace(/(\|[\t ]*)>/g, "$1\\>") : line,
+			)
+			.join("\n"),
+	);
+}
+
+// ---------------------------------------------------------------------------
 // Wikilinks
 // ---------------------------------------------------------------------------
 
@@ -92,6 +110,36 @@ export function decodeWikilink(sentinelText: string): WikilinkPayload | null {
 	const encoded = sentinelText.substring(WIKILINK_SENTINEL_PREFIX.length);
 	try {
 		return JSON.parse(fromBase64(encoded)) as WikilinkPayload;
+	} catch {
+		return null;
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Metadata panel (frontmatter → Confluence Page Properties macro)
+// ---------------------------------------------------------------------------
+
+/** A single rendered value in the metadata panel: plain text or a page link. */
+export interface MetaValue {
+	text: string;
+	link?: { title: string; anchor?: string; display: string };
+}
+export interface MetaField {
+	label: string;
+	values: MetaValue[];
+}
+
+/** Fenced-code language used to smuggle the metadata payload past the parser. */
+export const METADATA_FENCE_LANG = "confluence-metadata";
+
+/** Encode metadata fields as a fenced code block (survives the markdown parser). */
+export function encodeMetadataBlock(fields: MetaField[]): string {
+	return "```" + METADATA_FENCE_LANG + "\n" + toBase64(JSON.stringify(fields)) + "\n```";
+}
+
+export function decodeMetadataBlock(base64Body: string): MetaField[] | null {
+	try {
+		return JSON.parse(fromBase64(base64Body.trim())) as MetaField[];
 	} catch {
 		return null;
 	}
@@ -196,6 +244,41 @@ export function preprocessWikilinks(
 				anchor,
 				display,
 			});
+		}),
+	);
+}
+
+// Markdown links to vault files: [text](../path/Page.md) / (Page.md#Heading).
+// These are real cross-references but render as dead links (href="#") in
+// Confluence. Resolve the .md target like a wikilink so they become ac:link.
+const MD_FILE_LINK_RE = /(?<!!)\[([^\]\n]+)\]\(([^)\s]+?)(#[^)\s]*)?\)/g;
+
+export function preprocessMarkdownLinks(
+	md: string,
+	options: WikilinkPreprocessOptions,
+): string {
+	const { resolve, onWarning } = options;
+	return transformText(md, (text) =>
+		text.replace(MD_FILE_LINK_RE, (whole, label: string, url: string, frag: string | undefined) => {
+			if (/^[a-z]+:/i.test(url) || url.startsWith("#") || url.startsWith("//")) {
+				return whole; // external/scheme/absolute/same-page — leave alone
+			}
+			let decoded: string;
+			try {
+				decoded = decodeURIComponent(url);
+			} catch {
+				decoded = url;
+			}
+			if (!/\.md$/i.test(decoded)) return whole; // only vault .md files
+			const pageName = decoded.replace(/\.md$/i, "").split("/").pop()?.trim();
+			if (!pageName) return whole;
+			const res = resolve(pageName);
+			if (!res.inVault || !res.publishable || res.title === undefined) {
+				onWarning?.(`Markdown link target not published: ${url} — left as text`);
+				return label; // fall back to the link text
+			}
+			const anchor = frag ? frag.slice(1).replace(/^\^/, "") : undefined;
+			return encodeWikilink({ kind: "page", title: res.title, anchor, display: label });
 		}),
 	);
 }

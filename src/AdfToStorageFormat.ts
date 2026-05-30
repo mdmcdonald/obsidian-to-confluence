@@ -11,6 +11,9 @@ import {
 	decodeWikilink,
 	WIKILINK_SENTINEL_PREFIX,
 	WikilinkPayload,
+	decodeMetadataBlock,
+	METADATA_FENCE_LANG,
+	MetaField,
 } from "./obsidianPreprocess";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -30,6 +33,42 @@ function escapeHtml(text: string): string {
 		.replace(/</g, "&lt;")
 		.replace(/>/g, "&gt;")
 		.replace(/"/g, "&quot;");
+}
+
+// Inline HTML the parser (html:false) hands us as literal text but which is
+// valid in Confluence storage format — authors use these in markdown (notably
+// <br> for line breaks in table cells, and <sub>/<sup> for technical notation).
+const SAFE_INLINE_HTML = new Set([
+	"br", "sub", "sup", "b", "strong", "i", "em", "u", "s", "del", "ins",
+	"kbd", "abbr", "mark", "small", "cite", "q", "var", "samp",
+]);
+const INLINE_TAG_RE = /<(\/?)([a-zA-Z][a-zA-Z0-9]*)[^<>]*?(\/?)>/g;
+
+/**
+ * Like escapeHtml, but passes a whitelist of safe inline HTML tags through
+ * unescaped (attributes stripped; `<br>` normalised to `<br/>`). Used for plain
+ * text nodes so e.g. `a<br>b` and `H<sub>2</sub>O` render rather than showing
+ * literal `&lt;br&gt;`. A `<` that is not one of these tags (`a < b`, `x<5`,
+ * `<note>`) is still escaped normally.
+ */
+function escapeHtmlAllowingInline(text: string): string {
+	if (text.indexOf("<") === -1) return escapeHtml(text);
+	let out = "";
+	let last = 0;
+	let m: RegExpExecArray | null;
+	INLINE_TAG_RE.lastIndex = 0;
+	while ((m = INLINE_TAG_RE.exec(text)) !== null) {
+		const tag = m[2].toLowerCase();
+		if (!SAFE_INLINE_HTML.has(tag)) continue;
+		out += escapeHtml(text.slice(last, m.index));
+		if (tag === "br") out += "<br/>";
+		else if (m[1] === "/") out += `</${tag}>`;
+		else if (m[3] === "/") out += `<${tag}/>`;
+		else out += `<${tag}>`;
+		last = INLINE_TAG_RE.lastIndex;
+	}
+	out += escapeHtml(text.slice(last));
+	return out;
 }
 
 function convertChildren(node: AdfNode): string {
@@ -66,7 +105,9 @@ function convertText(node: AdfNode): string {
 		);
 	}
 
-	let html = escapeHtml(rawText);
+	// Inline code stays fully escaped (literal); other text may contain a small
+	// whitelist of inline HTML (e.g. <br>, <sub>) that should render.
+	let html = hasCodeMark ? escapeHtml(rawText) : escapeHtmlAllowingInline(rawText);
 	if (node.marks && Array.isArray(node.marks)) {
 		// Apply marks inside-out (first mark is outermost)
 		for (const mark of [...node.marks].reverse()) {
@@ -100,6 +141,39 @@ function renderWikilink(p: WikilinkPayload): string {
 		`<ri:page ri:content-title="${escapeHtml(p.title ?? "")}" />` +
 		body +
 		`</ac:link>`
+	);
+}
+
+/**
+ * Render a frontmatter metadata block as a Confluence Page Properties (details)
+ * macro: a 2-column property/value table. Relationship values resolved to a page
+ * become ac:links; everything else is plain text. The details macro also lets
+ * Confluence roll these up in a Page Properties Report.
+ */
+function renderMetadataPanel(fields: MetaField[]): string {
+	const rows = fields
+		.filter((f) => f.values && f.values.length > 0)
+		.map((f) => {
+			const vals = f.values
+				.map((v) =>
+					v.link
+						? renderWikilink({
+								kind: "page",
+								title: v.link.title,
+								anchor: v.link.anchor,
+								display: v.link.display,
+							})
+						: escapeHtmlAllowingInline(v.text),
+				)
+				.join(", ");
+			return `<tr><th><p>${escapeHtml(f.label)}</p></th><td><p>${vals}</p></td></tr>`;
+		})
+		.join("");
+	if (!rows) return "";
+	return (
+		`<ac:structured-macro ac:name="details">` +
+		`<ac:rich-text-body><table><tbody>${rows}</tbody></table></ac:rich-text-body>` +
+		`</ac:structured-macro>`
 	);
 }
 
@@ -245,6 +319,13 @@ function convertCodeBlock(node: AdfNode): string {
 	const code = node.content
 		?.map((child: AdfNode) => child.text ?? "")
 		.join("") ?? "";
+
+	// Metadata panel: a fenced sentinel produced from frontmatter by the adaptor.
+	// Emit a Confluence Page Properties (details) macro.
+	if (language === METADATA_FENCE_LANG) {
+		const fields = decodeMetadataBlock(code);
+		return fields ? renderMetadataPanel(fields) : "";
+	}
 
 	// Block LaTeX: language sentinel set by LatexPreprocessor. Emit the
 	// Appfire mathblock macro instead of a generic code macro.
@@ -546,6 +627,32 @@ function convertExpand(node: AdfNode): string {
 	);
 }
 
+function cellPlainText(node: AdfNode): string {
+	const collect = (n: AdfNode): string => {
+		if (!n) return "";
+		if (n.type === "text") return n.text ?? "";
+		if (Array.isArray(n.content)) return n.content.map(collect).join("");
+		return "";
+	};
+	return collect(node).trim();
+}
+
+// A measurement-like cell: a number (optionally a comparator/sign prefix, a
+// short unit, or a numeric range). Markdown table alignment (:---:) is discarded
+// by the bundled parser, so we right-align columns that are mostly numeric — the
+// main thing that makes data tables look professional.
+function isNumericCell(text: string): boolean {
+	const t = text.replace(/^[<>≤≥~±=\s]+/, "").trim();
+	if (!/^[0-9]/.test(t)) return false;
+	return /^[0-9][0-9.,]*( ?[a-zA-Z%×°µ/]{1,6})?( ?[-–—] ?[0-9][0-9.,]*( ?[a-zA-Z%×°µ/]{1,6})?)?$/.test(t);
+}
+
+// Empty / placeholder cells are neutral — they shouldn't stop a numeric column
+// from being right-aligned.
+function isPlaceholderCell(text: string): boolean {
+	return text === "" || /^(n\/?a|tbd|tbc|—|–|-{1,3}|\.{1,3}|\?|✓|✗|✔|✘|x)$/i.test(text);
+}
+
 function convertTable(node: AdfNode): string {
 	const width = node.attrs?.width;
 	const layout = node.attrs?.layout;
@@ -553,15 +660,53 @@ function convertTable(node: AdfNode): string {
 	if (width) style += `width: ${width}px;`;
 	const styleAttr = style ? ` style="${style}"` : "";
 	const classAttr = layout ? ` class="${escapeHtml(layout)}"` : "";
-	return `<table${classAttr}${styleAttr}><tbody>${convertChildren(node)}</tbody></table>`;
+
+	const rows: AdfNode[] = Array.isArray(node.content) ? node.content : [];
+	// Decide per-column right-alignment from the data rows (skip the header).
+	const numeric: number[] = [];
+	const dataCount: number[] = [];
+	rows.forEach((row, ri) => {
+		if (ri === 0) return;
+		let ci = 0;
+		(row.content ?? []).forEach((cell: AdfNode) => {
+			const txt = cellPlainText(cell);
+			if (!isPlaceholderCell(txt)) {
+				dataCount[ci] = (dataCount[ci] ?? 0) + 1;
+				if (isNumericCell(txt)) numeric[ci] = (numeric[ci] ?? 0) + 1;
+			}
+			ci += Math.max(1, cell.attrs?.colspan ?? 1);
+		});
+	});
+	const rightCol = dataCount.map(
+		(dc, ci) => dc >= 2 && (numeric[ci] ?? 0) >= dc * 0.6,
+	);
+
+	const body = rows
+		.map((row) => {
+			let ci = 0;
+			const cells = (row.content ?? [])
+				.map((cell: AdfNode) => {
+					const tag = cell.type === "tableHeader" ? "th" : "td";
+					const align = rightCol[ci] ? "right" : undefined;
+					ci += Math.max(1, cell.attrs?.colspan ?? 1);
+					return convertTableCell(tag, cell, align);
+				})
+				.join("");
+			return `<tr>${cells}</tr>`;
+		})
+		.join("");
+	return `<table${classAttr}${styleAttr}><tbody>${body}</tbody></table>`;
 }
 
-function convertTableCell(tag: string, node: AdfNode): string {
+function convertTableCell(tag: string, node: AdfNode, align?: string): string {
 	const attrs = node.attrs ?? {};
 	const parts: string[] = [];
 	if (attrs.colspan && attrs.colspan > 1) parts.push(` colspan="${attrs.colspan}"`);
 	if (attrs.rowspan && attrs.rowspan > 1) parts.push(` rowspan="${attrs.rowspan}"`);
-	if (attrs.background) parts.push(` style="background-color: ${escapeHtml(attrs.background)}"`);
+	const styles: string[] = [];
+	if (attrs.background) styles.push(`background-color: ${escapeHtml(attrs.background)}`);
+	if (align) styles.push(`text-align: ${align}`);
+	if (styles.length) parts.push(` style="${styles.join("; ")}"`);
 	// convertInlineContent (not convertChildren) so ==highlights== render in
 	// cells too. Harmless when a cell wraps block content (paragraphs): those
 	// nodes are passed through convertNode unchanged.

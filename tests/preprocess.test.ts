@@ -6,8 +6,12 @@ import { preprocessLatex } from "../src/LatexPreprocessor";
 import {
 	preprocessComments,
 	preprocessWikilinks,
+	preprocessMarkdownLinks,
+	preprocessTableCells,
 	encodeWikilink,
 	decodeWikilink,
+	encodeMetadataBlock,
+	decodeMetadataBlock,
 	WikilinkResolution,
 } from "../src/obsidianPreprocess";
 import { convertAdfToStorageFormat } from "../src/AdfToStorageFormat";
@@ -242,6 +246,104 @@ test("leftover wikilinks: href (embed) renders as plain text, not a broken ancho
 		marks: [{ type: "link", attrs: { href: "wikilinks:Note" } }],
 	});
 	assert.equal(linked, "<p>Note</p>");
+});
+
+// ---------------------------------------------------------------------------
+// Inline HTML passthrough (#1)
+// ---------------------------------------------------------------------------
+
+test("<br> and <sub>/<sup> pass through; non-tags stay escaped", () => {
+	assert.equal(para(txt("line1<br>line2")), `<p>line1<br/>line2</p>`);
+	assert.equal(para(txt("H<sub>2</sub>O and x<sup>2</sup>")), `<p>H<sub>2</sub>O and x<sup>2</sup></p>`);
+	assert.equal(para(txt("a < b and x<5")), `<p>a &lt; b and x&lt;5</p>`);
+	assert.equal(para(txt("<note>hi</note>")), `<p>&lt;note&gt;hi&lt;/note&gt;</p>`);
+});
+
+test("inline HTML inside inline code stays literal", () => {
+	assert.equal(para(txt("<br>", ["code"])), `<p><code>&lt;br&gt;</code></p>`);
+});
+
+// ---------------------------------------------------------------------------
+// Table-cell ">" escaping (#2)
+// ---------------------------------------------------------------------------
+
+test("a leading > in a table cell is escaped (not a blockquote)", () => {
+	const out = preprocessTableCells("| Metric | Min |\n| --- | --- |\n| continuity | >= 0.95 |\n");
+	assert.ok(out.includes("| \\>= 0.95 |"), out);
+	// a > in the middle of a cell, and a real blockquote line, are untouched
+	assert.equal(preprocessTableCells("| a > b | c |\n"), "| a > b | c |\n");
+	assert.equal(preprocessTableCells("> a real quote\n"), "> a real quote\n");
+});
+
+// ---------------------------------------------------------------------------
+// Markdown .md links (#4)
+// ---------------------------------------------------------------------------
+
+test("markdown link to a published .md file becomes a wikilink sentinel", () => {
+	const out = preprocessMarkdownLinks("see [the guide](../arch/L2-06.md) here", {
+		resolve: () => publishable("L2-06 Control Laser"),
+	});
+	const m = out.match(/`confluence-wikilink:[^`]+`/);
+	assert.ok(m, out);
+	assert.deepEqual(decodeSentinel(m![0]), { kind: "page", title: "L2-06 Control Laser", display: "the guide" });
+});
+
+test("markdown .md link to an unpublished file falls back to text; external untouched", () => {
+	assert.equal(preprocessMarkdownLinks("[x](../y.md)", { resolve: () => ({ inVault: false, publishable: false }) }), "x");
+	assert.equal(preprocessMarkdownLinks("[s](https://e.com/a.md)", { resolve: () => publishable("z") }), "[s](https://e.com/a.md)");
+	assert.equal(preprocessMarkdownLinks("[dir](radar/)", { resolve: () => publishable("z") }), "[dir](radar/)");
+});
+
+// ---------------------------------------------------------------------------
+// Table numeric alignment (#3)
+// ---------------------------------------------------------------------------
+
+test("a mostly-numeric column is right-aligned", () => {
+	const cell = (t: string, header = false) => ({
+		type: header ? "tableHeader" : "tableCell",
+		content: [{ type: "paragraph", content: [txt(t)] }],
+	});
+	const row = (...cells: unknown[]) => ({ type: "tableRow", content: cells });
+	const out = convertAdfToStorageFormat({
+		type: "doc",
+		content: [
+			{
+				type: "table",
+				content: [
+					row(cell("Param", true), cell("Value", true)),
+					row(cell("range"), cell("100 km")),
+					row(cell("rate"), cell("5 ms")),
+				],
+			},
+		],
+	});
+	// the "Value" column (numeric) is right-aligned; "Param" column is not
+	assert.ok(out.includes(`<th style="text-align: right"><p>Value</p></th>`), out);
+	assert.ok(out.includes(`<th><p>Param</p></th>`), out);
+	assert.ok(out.includes(`<td style="text-align: right"><p>100 km</p></td>`), out);
+});
+
+// ---------------------------------------------------------------------------
+// Metadata panel (#5)
+// ---------------------------------------------------------------------------
+
+test("metadata block round-trips and renders a details macro with links", () => {
+	const fields = [
+		{ label: "Type", values: [{ text: "MFA Substrate" }] },
+		{ label: "Influenced by", values: [{ text: "EOIR", link: { title: "EOIR-Overview", display: "EOIR" } }] },
+	];
+	const block = encodeMetadataBlock(fields);
+	// codec round-trips
+	const b64 = block.replace(/^```confluence-metadata\n/, "").replace(/\n```$/, "");
+	assert.deepEqual(decodeMetadataBlock(b64), fields);
+	// the codeBlock with our sentinel language renders a Page Properties macro
+	const out = convertAdfToStorageFormat({
+		type: "doc",
+		content: [{ type: "codeBlock", attrs: { language: "confluence-metadata" }, content: [{ type: "text", text: b64 }] }],
+	});
+	assert.ok(out.includes(`<ac:structured-macro ac:name="details">`), out);
+	assert.ok(out.includes(`<tr><th><p>Type</p></th><td><p>MFA Substrate</p></td></tr>`), out);
+	assert.ok(out.includes(`ri:content-title="EOIR-Overview"`), out);
 });
 
 test("ordinary external links still render as anchors", () => {
