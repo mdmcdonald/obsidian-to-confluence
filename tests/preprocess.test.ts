@@ -469,6 +469,27 @@ test("panel title as its own paragraph (blank line) is lifted into the title", (
 	assert.ok(out.includes(`<ac:rich-text-body><p>watch out</p></ac:rich-text-body>`), out);
 });
 
+test("a leftover [!type] marker (trailing-whitespace case) never surfaces as a title", () => {
+	// Library failed to strip the marker: first body text is the bare marker.
+	const out = convertAdfToStorageFormat({
+		type: "doc",
+		content: [
+			{
+				type: "panel",
+				attrs: { panelType: "note" },
+				content: [
+					{ type: "paragraph", content: [txt("[!note]"), { type: "hardBreak" }, txt("body")] },
+				],
+			},
+		],
+	});
+	assert.equal(
+		out,
+		`<ac:structured-macro ac:name="note"><ac:rich-text-body><p>body</p></ac:rich-text-body></ac:structured-macro>`,
+	);
+	assert.ok(!out.includes("[!"), out);
+});
+
 test("unknown blockquote callout type falls back to info, never literal [!type]", () => {
 	const out = convertAdfToStorageFormat({
 		type: "doc",

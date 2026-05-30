@@ -360,10 +360,24 @@ function extractPanelTitle(node: AdfNode): { title: string | undefined; body: Ad
 	return { title: undefined, body: node };
 }
 
+/**
+ * The bundled library sometimes fails to strip the `[!type]` marker — e.g. when
+ * trailing whitespace after the marker becomes a markdown hard break — leaving
+ * it in the title text. Strip a leftover marker so it never surfaces literally.
+ */
+function stripLeftoverCalloutMarker(title: string): string | undefined {
+	const m = title.match(/^[\t ]*\[!([a-zA-Z]+)\][-+]?[\t ]*(.*)$/);
+	if (!m) return title;
+	const rest = m[2].trim();
+	return rest.length > 0 ? rest : undefined;
+}
+
 function convertPanel(node: AdfNode): string {
 	const panelType: string = node.attrs?.panelType ?? "info";
 	const macro = PANEL_TYPE_TO_DC_MACRO[panelType] ?? "info";
-	const { title, body } = extractPanelTitle(node);
+	const extracted = extractPanelTitle(node);
+	const body = extracted.body;
+	const title = extracted.title !== undefined ? stripLeftoverCalloutMarker(extracted.title) : undefined;
 	const titleParam = title
 		? `<ac:parameter ac:name="title">${escapeHtml(title)}</ac:parameter>`
 		: "";
