@@ -323,12 +323,54 @@ const PANEL_TYPE_TO_DC_MACRO: Record<string, string> = {
 	custom: "info",
 };
 
+/**
+ * The library bakes the callout title (the user's title, or the capitalised
+ * type when none was given) into the panel body as the first text node,
+ * followed by a hardBreak before the body (same source line) or as its own
+ * paragraph (blank line after the marker). Lift it into the macro's `title`
+ * parameter so it renders in the panel header, matching convertCallout. Falls
+ * back to leaving the node untouched for any shape we don't recognise.
+ */
+function extractPanelTitle(node: AdfNode): { title: string | undefined; body: AdfNode } {
+	const content = node.content;
+	if (!Array.isArray(content) || content.length === 0) return { title: undefined, body: node };
+	const first = content[0];
+	if (first?.type !== "paragraph" || !Array.isArray(first.content) || first.content.length === 0) {
+		return { title: undefined, body: node };
+	}
+	const inline = first.content;
+	const head = inline[0];
+	if (head?.type !== "text" || typeof head.text !== "string" || head.text.length === 0) {
+		return { title: undefined, body: node };
+	}
+	// Title + hardBreak + rest of the body on the same source line.
+	if (inline.length >= 2 && inline[1]?.type === "hardBreak") {
+		const rest = inline.slice(2);
+		const restParas = rest.length > 0 ? [{ ...first, content: rest }] : [];
+		const body = { ...node, content: [...restParas, ...content.slice(1)] };
+		if (Array.isArray(body.content) && body.content.length > 0) {
+			return { title: head.text, body };
+		}
+		return { title: undefined, body: node }; // would leave an empty body — keep inline
+	}
+	// Title is its own paragraph (blank line separated it from the body).
+	if (inline.length === 1 && content.length >= 2) {
+		return { title: head.text, body: { ...node, content: content.slice(1) } };
+	}
+	return { title: undefined, body: node };
+}
+
 function convertPanel(node: AdfNode): string {
 	const panelType: string = node.attrs?.panelType ?? "info";
 	const macro = PANEL_TYPE_TO_DC_MACRO[panelType] ?? "info";
+	const { title, body } = extractPanelTitle(node);
+	const titleParam = title
+		? `<ac:parameter ac:name="title">${escapeHtml(title)}</ac:parameter>`
+		: "";
 	return (
 		`<ac:structured-macro ac:name="${macro}">` +
-		`<ac:rich-text-body>${convertChildren(node)}</ac:rich-text-body>` +
+		titleParam +
+		`<ac:rich-text-body>${convertChildren(body)}</ac:rich-text-body>` +
 		`</ac:structured-macro>`
 	);
 }
@@ -393,8 +435,10 @@ function detectCallout(blockquote: AdfNode):
 	const m = firstText.text.match(/^\[!([a-zA-Z]+)\][+-]?[\t ]*([^\n]*)/);
 	if (!m) return null;
 	const calloutType = m[1].toLowerCase();
-	const macro = CALLOUT_TYPE_MAP[calloutType];
-	if (!macro) return null;
+	// Unknown callout types fall back to an info panel (matching Obsidian, which
+	// renders an unrecognised [!type] as a default callout) rather than leaking
+	// the literal `[!type]` marker into the page as a plain blockquote.
+	const macro = CALLOUT_TYPE_MAP[calloutType] ?? "info";
 
 	const restOfFirstLine = m[2].trim();
 	const remainderAfterMarker = firstText.text.substring(m[0].length).replace(/^\n/, "");

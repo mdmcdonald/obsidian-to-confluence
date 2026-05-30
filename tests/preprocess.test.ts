@@ -432,6 +432,57 @@ test("panel nodes map to DC admonition macros (info/note/warning/tip)", () => {
 	assert.ok(!panel("info").includes("panelType"));
 });
 
+test("panel title (same line) is lifted into the macro title parameter", () => {
+	const out = convertAdfToStorageFormat({
+		type: "doc",
+		content: [
+			{
+				type: "panel",
+				attrs: { panelType: "note" },
+				content: [
+					{ type: "paragraph", content: [txt("My note"), { type: "hardBreak" }, txt("body line")] },
+				],
+			},
+		],
+	});
+	assert.equal(
+		out,
+		`<ac:structured-macro ac:name="note"><ac:parameter ac:name="title">My note</ac:parameter><ac:rich-text-body><p>body line</p></ac:rich-text-body></ac:structured-macro>`,
+	);
+});
+
+test("panel title as its own paragraph (blank line) is lifted into the title", () => {
+	const out = convertAdfToStorageFormat({
+		type: "doc",
+		content: [
+			{
+				type: "panel",
+				attrs: { panelType: "warning" },
+				content: [
+					{ type: "paragraph", content: [txt("Warning")] },
+					{ type: "paragraph", content: [txt("watch out")] },
+				],
+			},
+		],
+	});
+	assert.ok(out.includes(`<ac:structured-macro ac:name="warning"><ac:parameter ac:name="title">Warning</ac:parameter>`), out);
+	assert.ok(out.includes(`<ac:rich-text-body><p>watch out</p></ac:rich-text-body>`), out);
+});
+
+test("unknown blockquote callout type falls back to info, never literal [!type]", () => {
+	const out = convertAdfToStorageFormat({
+		type: "doc",
+		content: [
+			{
+				type: "blockquote",
+				content: [{ type: "paragraph", content: [txt("[!whatever]\nbody")] }],
+			},
+		],
+	});
+	assert.ok(out.includes(`ac:name="info"`), out);
+	assert.ok(!out.includes("[!"), `must not leak the marker: ${out}`);
+});
+
 test("integration: a wikilink inside a comment is removed, not linked", () => {
 	let md = "keep %%[[Secret]]%% end";
 	md = preprocessComments(md);
