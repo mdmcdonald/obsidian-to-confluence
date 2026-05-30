@@ -257,6 +257,10 @@ test("<br> and <sub>/<sup> pass through; non-tags stay escaped", () => {
 	assert.equal(para(txt("H<sub>2</sub>O and x<sup>2</sup>")), `<p>H<sub>2</sub>O and x<sup>2</sup></p>`);
 	assert.equal(para(txt("a < b and x<5")), `<p>a &lt; b and x&lt;5</p>`);
 	assert.equal(para(txt("<note>hi</note>")), `<p>&lt;note&gt;hi&lt;/note&gt;</p>`);
+	// tag-lookalikes with trailing words must NOT drop the words (data loss)
+	assert.equal(para(txt("max<strong value>100")), `<p>max&lt;strong value&gt;100</p>`);
+	assert.equal(para(txt("x<b when>0")), `<p>x&lt;b when&gt;0</p>`);
+	assert.equal(para(txt("a<br />b")), `<p>a<br/>b</p>`);
 });
 
 test("inline HTML inside inline code stays literal", () => {
@@ -286,6 +290,18 @@ test("markdown link to a published .md file becomes a wikilink sentinel", () => 
 	const m = out.match(/`confluence-wikilink:[^`]+`/);
 	assert.ok(m, out);
 	assert.deepEqual(decodeSentinel(m![0]), { kind: "page", title: "L2-06 Control Laser", display: "the guide" });
+});
+
+test("markdown .md link with nested brackets in text resolves", () => {
+	const out = preprocessMarkdownLinks("[Type [Enum]](T.md)", { resolve: () => publishable("Table") });
+	const m = out.match(/`confluence-wikilink:[^`]+`/);
+	assert.ok(m, out);
+	assert.equal(decodeSentinel(m![0])!.display, "Type [Enum]");
+});
+
+test("markdown .md link with a heading anchor carries the anchor", () => {
+	const out = preprocessMarkdownLinks("[t](page.md#Overview)", { resolve: () => publishable("Page") });
+	assert.deepEqual(decodeSentinel(out), { kind: "page", title: "Page", anchor: "Overview", display: "t" });
 });
 
 test("markdown .md link to an unpublished file falls back to text; external untouched", () => {
@@ -344,6 +360,16 @@ test("metadata block round-trips and renders a details macro with links", () => 
 	assert.ok(out.includes(`<ac:structured-macro ac:name="details">`), out);
 	assert.ok(out.includes(`<tr><th><p>Type</p></th><td><p>MFA Substrate</p></td></tr>`), out);
 	assert.ok(out.includes(`ri:content-title="EOIR-Overview"`), out);
+});
+
+test("metadata relationship link with a heading anchor renders ac:anchor", () => {
+	const fields = [{ label: "Parent", values: [{ text: "P", link: { title: "Page", anchor: "Section One", display: "P" } }] }];
+	const b64 = encodeMetadataBlock(fields).replace(/^```confluence-metadata\n/, "").replace(/\n```$/, "");
+	const out = convertAdfToStorageFormat({
+		type: "doc",
+		content: [{ type: "codeBlock", attrs: { language: "confluence-metadata" }, content: [{ type: "text", text: b64 }] }],
+	});
+	assert.ok(out.includes(`ac:anchor="SectionOne"`), out);
 });
 
 test("ordinary external links still render as anchors", () => {

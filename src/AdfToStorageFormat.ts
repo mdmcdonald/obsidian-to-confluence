@@ -42,14 +42,17 @@ const SAFE_INLINE_HTML = new Set([
 	"br", "sub", "sup", "b", "strong", "i", "em", "u", "s", "del", "ins",
 	"kbd", "abbr", "mark", "small", "cite", "q", "var", "samp",
 ]);
-const INLINE_TAG_RE = /<(\/?)([a-zA-Z][a-zA-Z0-9]*)[^<>]*?(\/?)>/g;
+// Only bare tags (optional whitespace + optional self-close), NOT attributes.
+// This deliberately does NOT match "<strong value>" so that prose like
+// "max<strong value>100" is escaped intact rather than losing " value".
+const INLINE_TAG_RE = /<(\/?)([a-zA-Z][a-zA-Z0-9]*)\s*\/?>/g;
 
 /**
- * Like escapeHtml, but passes a whitelist of safe inline HTML tags through
- * unescaped (attributes stripped; `<br>` normalised to `<br/>`). Used for plain
- * text nodes so e.g. `a<br>b` and `H<sub>2</sub>O` render rather than showing
- * literal `&lt;br&gt;`. A `<` that is not one of these tags (`a < b`, `x<5`,
- * `<note>`) is still escaped normally.
+ * Like escapeHtml, but passes a whitelist of safe, attribute-less inline HTML
+ * tags through unescaped (`<br>` normalised to `<br/>`). Used for plain text
+ * nodes so e.g. `a<br>b` and `H<sub>2</sub>O` render rather than showing literal
+ * `&lt;br&gt;`. Anything that is not a clean whitelisted tag (`a < b`, `x<5`,
+ * `<note>`, `<b foo>`) is still escaped normally — no surrounding text is lost.
  */
 function escapeHtmlAllowingInline(text: string): string {
 	if (text.indexOf("<") === -1) return escapeHtml(text);
@@ -61,10 +64,7 @@ function escapeHtmlAllowingInline(text: string): string {
 		const tag = m[2].toLowerCase();
 		if (!SAFE_INLINE_HTML.has(tag)) continue;
 		out += escapeHtml(text.slice(last, m.index));
-		if (tag === "br") out += "<br/>";
-		else if (m[1] === "/") out += `</${tag}>`;
-		else if (m[3] === "/") out += `<${tag}/>`;
-		else out += `<${tag}>`;
+		out += tag === "br" ? "<br/>" : m[1] === "/" ? `</${tag}>` : `<${tag}>`;
 		last = INLINE_TAG_RE.lastIndex;
 	}
 	out += escapeHtml(text.slice(last));
@@ -324,7 +324,9 @@ function convertCodeBlock(node: AdfNode): string {
 	// Emit a Confluence Page Properties (details) macro.
 	if (language === METADATA_FENCE_LANG) {
 		const fields = decodeMetadataBlock(code);
-		return fields ? renderMetadataPanel(fields) : "";
+		if (fields) return renderMetadataPanel(fields);
+		console.warn(`[ADF→Storage] Failed to decode metadata block`);
+		return "";
 	}
 
 	// Block LaTeX: language sentinel set by LatexPreprocessor. Emit the

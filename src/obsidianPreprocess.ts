@@ -251,7 +251,8 @@ export function preprocessWikilinks(
 // Markdown links to vault files: [text](../path/Page.md) / (Page.md#Heading).
 // These are real cross-references but render as dead links (href="#") in
 // Confluence. Resolve the .md target like a wikilink so they become ac:link.
-const MD_FILE_LINK_RE = /(?<!!)\[([^\]\n]+)\]\(([^)\s]+?)(#[^)\s]*)?\)/g;
+// Link text allows one level of nested brackets ([Type [Enum]](x.md)).
+const MD_FILE_LINK_RE = /(?<!!)\[((?:[^\][\n]|\[[^\]\n]*\])+)\]\(([^)\s]+?)(#[^)\s]*)?\)/g;
 
 export function preprocessMarkdownLinks(
 	md: string,

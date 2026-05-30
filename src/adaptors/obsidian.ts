@@ -311,17 +311,22 @@ export default class ObsidianAdaptor implements LoaderAdaptor {
 			display = target.slice(i + 1).trim();
 			target = target.slice(0, i).trim();
 		}
-		const bare = target.replace(/#.*$/, "").trim();
+		const hashIdx = target.indexOf("#");
+		const bare = (hashIdx >= 0 ? target.slice(0, hashIdx) : target).trim();
+		const frag = hashIdx >= 0 ? target.slice(hashIdx + 1).trim() : "";
+		// Heading anchors carry through; block refs (^id) have no Confluence
+		// equivalent and are dropped (link to the page only).
+		const anchor = frag && !frag.startsWith("^") ? frag : undefined;
 
 		// 1) by filename (wikilink-style)
 		const res = this.resolveWikilink(bare, sourcePath);
 		if (res.publishable && res.title !== undefined) {
-			return { text: display ?? bare, link: { title: res.title, display: display ?? bare } };
+			return { text: display ?? bare, link: { title: res.title, anchor, display: display ?? bare } };
 		}
 		// 2) by ontology graph id
 		const byId = this.idToTitle.get(bare);
 		if (byId !== undefined) {
-			return { text: display ?? byId, link: { title: byId, display: display ?? byId } };
+			return { text: display ?? byId, link: { title: byId, anchor, display: display ?? byId } };
 		}
 		// 3) plain, humanised
 		return { text: display ?? humaniseRef(value) };
