@@ -372,10 +372,44 @@ function stripLeftoverCalloutMarker(title: string): string | undefined {
 	return rest.length > 0 ? rest : undefined;
 }
 
+/**
+ * Remove a leading `[!type]` marker the library left in the panel body. It
+ * fails to strip the marker when the callout's first line carries inline
+ * formatting (inline code, math, links), leaving e.g. "[!note] …" as the first
+ * body text. If the marker was the whole first text node, also drop a following
+ * hardBreak (the trailing-whitespace case).
+ */
+function stripLeadingMarker(node: AdfNode): AdfNode {
+	const content = node.content;
+	if (!Array.isArray(content) || content.length === 0) return node;
+	const first = content[0];
+	if (first?.type !== "paragraph" || !Array.isArray(first.content) || first.content.length === 0) {
+		return node;
+	}
+	const inline = first.content;
+	const head = inline[0];
+	if (head?.type !== "text" || typeof head.text !== "string") return node;
+	const m = head.text.match(/^[\t ]*\[!([a-zA-Z]+)\][-+]?[\t ]*/);
+	if (!m) return node;
+	const rest = head.text.slice(m[0].length);
+	let newInline: AdfNode[];
+	if (rest.length > 0) {
+		newInline = [{ ...head, text: rest }, ...inline.slice(1)];
+	} else {
+		newInline = inline.slice(1);
+		if (newInline[0]?.type === "hardBreak") newInline = newInline.slice(1);
+	}
+	const newContent =
+		newInline.length > 0
+			? [{ ...first, content: newInline }, ...content.slice(1)]
+			: content.slice(1);
+	return { ...node, content: newContent };
+}
+
 function convertPanel(node: AdfNode): string {
 	const panelType: string = node.attrs?.panelType ?? "info";
 	const macro = PANEL_TYPE_TO_DC_MACRO[panelType] ?? "info";
-	const extracted = extractPanelTitle(node);
+	const extracted = extractPanelTitle(stripLeadingMarker(node));
 	const body = extracted.body;
 	const title = extracted.title !== undefined ? stripLeftoverCalloutMarker(extracted.title) : undefined;
 	const titleParam = title

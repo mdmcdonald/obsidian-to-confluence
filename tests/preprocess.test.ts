@@ -490,6 +490,27 @@ test("a leftover [!type] marker (trailing-whitespace case) never surfaces as a t
 	assert.ok(!out.includes("[!"), out);
 });
 
+test("a marker left in the body (inline-formatted first line) is stripped", () => {
+	// Library failed to strip the marker because the first line had inline code.
+	const out = convertAdfToStorageFormat({
+		type: "doc",
+		content: [
+			{
+				type: "panel",
+				attrs: { panelType: "note" },
+				content: [
+					{
+						type: "paragraph",
+						content: [txt("[!note] See "), txt("id:", ["code"]), txt(" for details")],
+					},
+				],
+			},
+		],
+	});
+	assert.ok(!out.includes("[!"), out);
+	assert.ok(out.includes(`<p>See <code>id:</code> for details</p>`), out);
+});
+
 test("unknown blockquote callout type falls back to info, never literal [!type]", () => {
 	const out = convertAdfToStorageFormat({
 		type: "doc",
