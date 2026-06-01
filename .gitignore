@@ -6,3 +6,9 @@ dist-tests/
 
 # Windows reserved device names (can't be indexed by git)
 nul
+
+# review-agent scratch
+test-*.mjs
+test_*.js
+_*.mjs
+_*.cjs
