@@ -2,6 +2,7 @@ import { ChartData, MermaidRenderer } from "@markdown-confluence/lib";
 import { loadMermaid, Plugin } from "obsidian";
 import { Mermaid } from "mermaid";
 import SparkMD5 from "spark-md5";
+import { replaceForeignObjects, stripBackgroundStyles } from "./mermaidSvg";
 
 export type PNGQuality = "low" | "medium" | "high";
 
@@ -17,98 +18,6 @@ const FALLBACK_PNG = Buffer.from([
 	0x00, 0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x8d, 0xb4, 0x19, 0x3a, 0x00,
 	0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
 ]);
-
-function escapeXmlText(text: string): string {
-	return text
-		.replace(/&/g, "&amp;")
-		.replace(/</g, "&lt;")
-		.replace(/>/g, "&gt;");
-}
-
-function getAttr(attrs: string, name: string): string | undefined {
-	const m = attrs.match(new RegExp(`\\b${name}="([^"]*)"`));
-	return m ? m[1] : undefined;
-}
-
-/**
- * Replace every <foreignObject> in the SVG with a native SVG <text> at the
- * same centre. Electron's createImageBitmap and <img> data-URL paths both
- * refuse SVGs containing foreignObject — mermaid uses it for HTML labels in
- * most non-flowchart diagram types (sequence, class, state, ER, gantt, ...).
- *
- * Uses string replacement rather than DOMParser+XMLSerializer because a prior
- * commit (b1f8021 → reverted in 50775b6) found that round-tripping the
- * mermaid SVG through the DOM corrupted it in ways that broke rasterization.
- * HTML styling inside labels is lost; textual content and layout survive.
- */
-function replaceForeignObjects(svg: string): string {
-	if (!svg.includes("<foreignObject")) return svg;
-	let replaced = 0;
-	const out = svg.replace(
-		/<foreignObject\b([^>]*)>([\s\S]*?)<\/foreignObject>/gi,
-		(_match, attrs: string, inner: string) => {
-			replaced++;
-			const x = parseFloat(getAttr(attrs, "x") || "0");
-			const y = parseFloat(getAttr(attrs, "y") || "0");
-			const width = parseFloat(getAttr(attrs, "width") || "0");
-			const height = parseFloat(getAttr(attrs, "height") || "0");
-			const cx = x + width / 2;
-			const cy = y + height / 2;
-
-			// Mermaid typically wraps each visual line in a <div> or <span>.
-			// Pull each non-empty block-element text as one line; if there are
-			// no block elements, treat the whole inner as a single line.
-			const blockMatches = Array.from(
-				inner.matchAll(/<(?:div|p|span)\b[^>]*>([\s\S]*?)<\/(?:div|p|span)>/gi),
-			);
-			let lines: string[] = [];
-			if (blockMatches.length > 0) {
-				for (const m of blockMatches) {
-					const t = m[1].replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim();
-					if (t.length > 0) lines.push(t);
-				}
-			}
-			if (lines.length === 0) {
-				const flat = inner.replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim();
-				lines = flat.length > 0 ? [flat] : [""];
-			}
-
-			const baseAttrs = `text-anchor="middle" font-family="sans-serif" font-size="14"`;
-			if (lines.length === 1) {
-				return `<text x="${cx}" y="${cy}" dominant-baseline="central" ${baseAttrs}>${escapeXmlText(lines[0])}</text>`;
-			}
-			const lineHeight = 16;
-			const startY = cy - (lineHeight * (lines.length - 1)) / 2;
-			const tspans = lines
-				.map(
-					(line, i) =>
-						`<tspan x="${cx}" y="${startY + i * lineHeight}">${escapeXmlText(line)}</tspan>`,
-				)
-				.join("");
-			return `<text ${baseAttrs}>${tspans}</text>`;
-		},
-	);
-	if (replaced > 0) {
-		console.log(`[MermaidPNG] Replaced ${replaced} foreignObject element(s) with native SVG <text>`);
-	}
-	return out;
-}
-
-/**
- * Drop any inline `background:` style that mermaid attaches to elements —
- * the previous SVGMermaidRenderer found these caused some renderers to
- * reject the SVG. Run before dimension fix-up.
- */
-function stripBackgroundStyles(svg: string): string {
-	return svg.replace(/style="([^"]*)"/gi, (_m, style: string) => {
-		const cleaned = style
-			.split(";")
-			.map((s) => s.trim())
-			.filter((s) => s.length > 0 && !/^background\s*:/i.test(s))
-			.join("; ");
-		return `style="${cleaned}"`;
-	});
-}
 
 export class MermaidElectronPNGRenderer implements MermaidRenderer {
 	private quality: PNGQuality;
@@ -201,7 +110,9 @@ export class MermaidElectronPNGRenderer implements MermaidRenderer {
 
 				try {
 					const { svg: rawSvg } = await mermaid.render(chartId, chart.data);
-					const svgNoFo = replaceForeignObjects(rawSvg);
+					const svgNoFo = replaceForeignObjects(rawSvg, (n) =>
+						console.log(`[MermaidPNG] Replaced ${n} foreignObject element(s) with native SVG <text>`),
+					);
 					const svg = stripBackgroundStyles(svgNoFo);
 					console.log(`[MermaidPNG] mermaid.render produced ${rawSvg.length} chars (sanitised: ${svg.length} chars)`);
 
