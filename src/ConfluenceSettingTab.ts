@@ -167,6 +167,18 @@ export class ConfluenceSettingTab extends PluginSettingTab {
 			);
 
 		new Setting(containerEl)
+			.setName("Preserve folder structure")
+			.setDesc("Mirror your vault's folder hierarchy as nested Confluence pages (each folder becomes a page; a folder's README/index becomes its landing page). When off, pages are published flat under the parent. Folder names that repeat across the vault are disambiguated by their parent folder (e.g. \"Radar / Architecture\").")
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.plugin.settings.preserveFolderStructure)
+					.onChange(async (value) => {
+						this.plugin.settings.preserveFolderStructure = value;
+						await this.plugin.saveSettings();
+					}),
+			);
+
+		new Setting(containerEl)
 			.setName("Metadata panel")
 			.setDesc("Add a Page Properties panel at the top of each page built from the note's frontmatter (id, type, status, subject, and ontology relationships like parent / wasInfluencedBy / requires — resolved to page links where possible). Also feeds Confluence Page Properties Reports.")
 			.addToggle((toggle) =>

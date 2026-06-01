@@ -13,6 +13,7 @@ import ObsidianAdaptor, { TitleRename } from "./adaptors/obsidian";
 import { PublishRecord, detectOrphans, exceedsRemovalCap } from "./publishState";
 import { CompletedModal } from "./CompletedModal";
 import { ObsidianConfluenceClient } from "./MyBaseClient";
+import { StructuredPublisher } from "./StructuredPublisher";
 import {
 	ConfluencePerPageForm,
 	ConfluencePerPageUIValues,
@@ -33,6 +34,8 @@ export interface ObsidianPluginSettings
 	skipUnchanged: boolean;
 	/** Emit a Page Properties panel from each note's frontmatter. */
 	showMetadataPanel: boolean;
+	/** Mirror the vault folder hierarchy as nested Confluence pages. */
+	preserveFolderStructure: boolean;
 	/** What to do with a Confluence page whose source note was deleted/unpublished. */
 	onDeletedNote: DeletedNoteAction;
 	/**
@@ -156,6 +159,7 @@ export default class ConfluencePlugin extends Plugin {
 			this.app,
 		);
 		this.adaptor.showMetadataPanel = this.settings.showMetadataPanel;
+		this.adaptor.preserveFolderStructure = this.settings.preserveFolderStructure;
 
 		const quality = this.settings.mermaidQuality || "high";
 		const mermaidRenderer = new MermaidElectronPNGRenderer(quality, this);
@@ -173,12 +177,19 @@ export default class ConfluencePlugin extends Plugin {
 			? { ...this.settings, folderToPublish: "/" }
 			: this.settings;
 		const settingsLoader = new StaticSettingsLoader(loaderSettings);
-		this.publisher = new Publisher(
-			this.adaptor,
-			settingsLoader,
-			confluenceClient,
-			[mermaidPlugin],
-		);
+		this.publisher = this.settings.preserveFolderStructure
+			? new StructuredPublisher(
+					this.adaptor,
+					settingsLoader,
+					confluenceClient,
+					[mermaidPlugin],
+				)
+			: new Publisher(
+					this.adaptor,
+					settingsLoader,
+					confluenceClient,
+					[mermaidPlugin],
+				);
 	}
 
 
@@ -869,6 +880,7 @@ export default class ConfluencePlugin extends Plugin {
 				deduplicateTitles: true,
 				skipUnchanged: true,
 				showMetadataPanel: true,
+				preserveFolderStructure: true,
 				onDeletedNote: "off" as DeletedNoteAction,
 				maxDeletePerPublish: 25,
 				publishedPages: {},

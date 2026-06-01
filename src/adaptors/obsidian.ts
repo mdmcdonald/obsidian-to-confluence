@@ -6,10 +6,22 @@ import {
 	LoaderAdaptor,
 	MarkdownFile,
 	ConfluencePageConfig,
+	convertMDtoADF,
 } from "@markdown-confluence/lib";
+import { folderFile } from "@markdown-confluence/lib/dist/FolderFile.js";
 import { lookup } from "mime-types";
 import SparkMD5 from "spark-md5";
 import { preprocessLatex } from "../LatexPreprocessor";
+import {
+	deriveStructure,
+	computeFolderTitles,
+	buildTree,
+	assertUniqueTitles,
+	splitPath,
+	relativeTo,
+	type DerivedStructure,
+	type FolderTreeNode,
+} from "../folderTree";
 import {
 	preprocessComments,
 	preprocessWikilinks,
@@ -156,6 +168,14 @@ export default class ObsidianAdaptor implements LoaderAdaptor {
 	private idToTitle: Map<string, string> = new Map();
 	/** Set by the plugin: emit a Page Properties panel from frontmatter. */
 	showMetadataPanel = false;
+	/** Set by the plugin: preserve the vault folder hierarchy in Confluence. */
+	preserveFolderStructure = true;
+	/** Global folder structure (commonPath, folders, landing files), per publish. */
+	private structure: DerivedStructure | undefined;
+	/** folderRelPath → unique Confluence title. */
+	private folderTitleByPath: Map<string, string> = new Map();
+	/** landing file vault path → its folder's title (for skip-unchanged hashing). */
+	private landingToFolderTitle: Map<string, string> = new Map();
 
 	constructor(
 		vault: Vault,
@@ -275,10 +295,89 @@ export default class ObsidianAdaptor implements LoaderAdaptor {
 		if (this.dedupMap.size > 0) {
 			console.log(`[Confluence] Deduplicating ${this.dedupMap.size} colliding page title(s)`);
 		}
+
+		// Folder structure (computed over the WHOLE set so it is stable across
+		// batches). Folder titles are deduped against the file titles too.
+		this.structure = undefined;
+		this.folderTitleByPath.clear();
+		this.landingToFolderTitle.clear();
+		if (this.preserveFolderStructure && paths.length > 0) {
+			const structure = deriveStructure(paths);
+			this.folderTitleByPath = computeFolderTitles(
+				structure.folders,
+				this.publishTitleByPath.values(),
+			);
+			this.structure = structure;
+
+			// A folder's README/index/eponymous file IS the folder page, so its
+			// effective title becomes the folder title — point inbound wikilinks
+			// and ontology refs at the folder, not the consumed file's old title.
+			for (const [folderRel, landingPath] of structure.indexFileByFolder) {
+				const folderTitle = this.folderTitleByPath.get(folderRel);
+				if (!folderTitle) continue;
+				this.publishTitleByPath.set(landingPath, folderTitle);
+				this.landingToFolderTitle.set(landingPath, folderTitle);
+				const id = this.metadataCache.getCache(landingPath)?.frontmatter?.id;
+				if (id != null) {
+					const key = String(id).replace(/^["']|["']$/g, "").trim();
+					if (key) this.idToTitle.set(key, folderTitle);
+				}
+			}
+			console.log(`[Confluence] Preserving folder structure: ${structure.folders.length} folder(s), root "${structure.commonPath || "(vault)"}"`);
+		}
 	}
 
 	getTitleRenames(): TitleRename[] {
 		return Array.from(this.dedupMap.values());
+	}
+
+	/**
+	 * Build the library's page tree for a batch of files, preserving the global
+	 * folder hierarchy (see folderTree.ts). Used by StructuredPublisher in place
+	 * of the library's batch-collapsing createFolderStructure.
+	 */
+	async buildLocalAdfTree(
+		markdownFiles: MarkdownFile[],
+		settings: ConfluenceUploadSettings.ConfluenceSettings,
+	): Promise<FolderTreeNode> {
+		const structure = this.structure;
+		if (!structure) {
+			// Should not happen (computePublishContext runs first), but never crash.
+			throw new Error("Folder structure not computed before publish");
+		}
+
+		// A folder's landing file (README/index) IS its page content. If a batch
+		// touches a folder but its landing file was filtered out (e.g. unchanged,
+		// skip-unchanged), load it on demand so the folder page keeps its content
+		// instead of being overwritten with a blank placeholder.
+		const have = new Set(markdownFiles.map((f) => f.absoluteFilePath));
+		const touched = new Set<string>();
+		for (const f of markdownFiles) {
+			const segs = splitPath(relativeTo(structure.commonPath, f.absoluteFilePath)).slice(0, -1);
+			for (let i = 1; i <= segs.length; i++) touched.add(segs.slice(0, i).join("/"));
+		}
+		const extra: MarkdownFile[] = [];
+		for (const folderRel of touched) {
+			const landing = structure.indexFileByFolder.get(folderRel);
+			if (landing && !have.has(landing)) {
+				try {
+					extra.push(await this.loadMarkdownFile(landing));
+				} catch (e) {
+					console.warn(`[Confluence] Could not load folder landing file ${landing}:`, e);
+				}
+			}
+		}
+		const allFiles = extra.length ? [...markdownFiles, ...extra] : markdownFiles;
+
+		const tree = buildTree(allFiles, {
+			commonPath: structure.commonPath,
+			folderTitle: this.folderTitleByPath,
+			indexFileByFolder: structure.indexFileByFolder,
+			folderFileAdf: folderFile,
+			convertFile: (mf) => convertMDtoADF(mf, settings),
+		});
+		assertUniqueTitles(tree); // the safety check the library's tree builder runs
+		return tree;
 	}
 
 	/**
@@ -372,7 +471,11 @@ export default class ObsidianAdaptor implements LoaderAdaptor {
 	 */
 	async computePublishHash(absoluteFilePath: string): Promise<string> {
 		const md = await this.loadMarkdownFile(absoluteFilePath);
-		return SparkMD5.hash(`${md.pageTitle} ${md.contents}`);
+		// A folder landing file is published under its FOLDER's title (not its own
+		// pageTitle), so fold that in — otherwise a folder-title change (e.g. a new
+		// colliding sibling) wouldn't trigger a republish of the landing page.
+		const folderTitle = this.landingToFolderTitle.get(absoluteFilePath) ?? "";
+		return SparkMD5.hash(`${md.pageTitle} ${folderTitle} ${md.contents}`);
 	}
 
 	async getMarkdownFilesToUpload(): Promise<FilesToUpload> {
