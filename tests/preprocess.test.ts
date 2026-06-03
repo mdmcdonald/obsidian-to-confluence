@@ -579,6 +579,56 @@ test("panel title (same line) is lifted into the macro title parameter", () => {
 	);
 });
 
+test("a macro (inlineExtension) becomes a structured-macro, not blank — fixes blank folder pages", () => {
+	// Mirrors the library's folderFile: a Page Tree macro wrapped in a paragraph.
+	const out = convertAdfToStorageFormat({
+		type: "doc",
+		content: [
+			{
+				type: "paragraph",
+				content: [
+					{
+						type: "inlineExtension",
+						attrs: {
+							extensionType: "com.atlassian.confluence.macro.core",
+							extensionKey: "pagetree",
+							parameters: {
+								macroParams: {
+									root: { value: "@self" },
+									startDepth: { value: "1" },
+									searchBox: { value: "true" },
+								},
+							},
+						},
+					},
+				],
+			},
+		],
+	});
+	assert.ok(out.includes(`<ac:structured-macro ac:name="pagetree">`), out);
+	assert.ok(out.includes(`<ac:parameter ac:name="root">@self</ac:parameter>`), out);
+	assert.ok(out.includes(`<ac:parameter ac:name="startDepth">1</ac:parameter>`), out);
+	assert.ok(out.includes(`<ac:parameter ac:name="searchBox">true</ac:parameter>`), out);
+	assert.ok(!/^<p>\s*<\/p>$/.test(out), `should not be an empty paragraph: ${out}`);
+});
+
+test("a bodied macro (bodiedExtension) wraps its children in rich-text-body", () => {
+	const out = convertAdfToStorageFormat({
+		type: "doc",
+		content: [
+			{
+				type: "bodiedExtension",
+				attrs: { extensionKey: "info", parameters: { macroParams: {} } },
+				content: [{ type: "paragraph", content: [txt("hi")] }],
+			},
+		],
+	});
+	assert.equal(
+		out,
+		`<ac:structured-macro ac:name="info"><ac:rich-text-body><p>hi</p></ac:rich-text-body></ac:structured-macro>`,
+	);
+});
+
 test("panel title as its own paragraph (blank line) is lifted into the title", () => {
 	const out = convertAdfToStorageFormat({
 		type: "doc",

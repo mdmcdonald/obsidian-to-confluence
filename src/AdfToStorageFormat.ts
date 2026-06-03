@@ -629,6 +629,32 @@ function convertExpand(node: AdfNode): string {
 	);
 }
 
+/**
+ * Convert an ADF extension node — a Confluence macro — to a storage-format
+ * `<ac:structured-macro>`. Covers `extension`/`inlineExtension`/`bodiedExtension`.
+ * Without this, macro nodes fall through to the "unknown node" path and render as
+ * empty content: notably the library's folder landing pages, whose body is a Page
+ * Tree macro (`extensionKey: "pagetree"`), were publishing blank on Data Center.
+ * Macro params come from `attrs.parameters.macroParams` (each `{ value }`); a
+ * bodiedExtension's children become the macro's rich-text body.
+ */
+function convertExtension(node: AdfNode): string {
+	const macro = node.attrs?.extensionKey;
+	if (!macro) return convertChildren(node); // not a macro we can name — fall back
+	const macroParams = node.attrs?.parameters?.macroParams ?? {};
+	let params = "";
+	for (const key of Object.keys(macroParams)) {
+		const value = macroParams[key]?.value;
+		if (value === undefined || value === null) continue;
+		params += `<ac:parameter ac:name="${escapeHtml(key)}">${escapeHtml(String(value))}</ac:parameter>`;
+	}
+	const body =
+		node.content && node.content.length > 0
+			? `<ac:rich-text-body>${convertChildren(node)}</ac:rich-text-body>`
+			: "";
+	return `<ac:structured-macro ac:name="${escapeHtml(String(macro))}">${params}${body}</ac:structured-macro>`;
+}
+
 function cellPlainText(node: AdfNode): string {
 	const collect = (n: AdfNode): string => {
 		if (!n) return "";
@@ -791,6 +817,10 @@ function convertNode(node: AdfNode): string {
 			const accountId = node.attrs?.id ?? "";
 			return `<ac:link><ri:user ri:account-id="${escapeHtml(accountId)}" /></ac:link>`;
 		}
+		case "extension":
+		case "inlineExtension":
+		case "bodiedExtension":
+			return convertExtension(node);
 		default:
 			// Unknown node type: render children if any, otherwise empty
 			console.warn(`[ADF→Storage] Unknown node type: ${node.type}`);
