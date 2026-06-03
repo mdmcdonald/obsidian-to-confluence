@@ -90,13 +90,17 @@ export class StructuredPublisher extends Publisher {
 	/**
 	 * Move any page whose current parent differs from its intended parent under the
 	 * correct one, via `PUT /content/{id}/move/append/{targetId}`. The decision is
-	 * made by the pure, harness-tested `planReparents`. Failures are logged (an older
-	 * DC could lack the move endpoint, like archive) rather than aborting the publish.
+	 * made by the pure, harness-tested `planReparents`. Each move is VERIFIED by
+	 * re-fetching the page's parent afterwards — because this DC has silently ignored
+	 * the `ancestors` field before, the move endpoint could be ignored the same way,
+	 * and a blindly-counted "moved" would be misleading. The summary distinguishes
+	 * applied / accepted-but-ignored / failed so the cause is unambiguous in the log.
 	 */
 	private async enforceParentHierarchy(nodes: Any[], client: Any): Promise<void> {
 		const moves = planReparents(nodes);
 		if (moves.length === 0) return;
-		let moved = 0;
+		let applied = 0;
+		let ignored = 0;
 		let failed = 0;
 		for (const m of moves) {
 			try {
@@ -104,18 +108,28 @@ export class StructuredPublisher extends Publisher {
 					url: `/api/content/${m.pageId}/move/append/${m.targetId}`,
 					method: "PUT",
 				});
-				moved++;
 			} catch (e) {
 				failed++;
 				console.warn(
-					`[Confluence] Could not re-parent "${m.title}" (${m.pageId}) under ${m.targetId}:`,
+					`[Confluence] move endpoint rejected for "${m.title}" (${m.pageId}) → ${m.targetId}:`,
 					e,
 				);
+				continue;
+			}
+			// Confirm the move actually took effect (DC may accept it but not apply it).
+			try {
+				const after = await client.content.getContentById({ id: m.pageId, expand: ["ancestors"] });
+				const anc: Any[] = after?.ancestors ?? [];
+				const actualParent = anc.length ? anc[anc.length - 1]?.id : undefined;
+				if (String(actualParent) === String(m.targetId)) applied++;
+				else ignored++;
+			} catch {
+				applied++; // couldn't verify — assume the accepted move worked
 			}
 		}
-		console.log(
-			`[Confluence] Folder hierarchy: re-parented ${moved}/${moves.length} page(s) via move endpoint` +
-			(failed ? ` — ${failed} FAILED (move endpoint may be unavailable on this Confluence)` : ""),
-		);
+		let msg = `[Confluence] Folder hierarchy: ${applied}/${moves.length} page(s) re-parented (move endpoint)`;
+		if (failed) msg += `; ${failed} call(s) FAILED — move endpoint may be unavailable on this Confluence`;
+		if (ignored) msg += `; ${ignored} accepted but NOT APPLIED — this Confluence is ignoring the move endpoint too (REST re-parenting unsupported here)`;
+		console.log(msg);
 	}
 }
