@@ -34,6 +34,8 @@ export interface ObsidianPluginSettings
 	skipUnchanged: boolean;
 	/** Emit a Page Properties panel from each note's frontmatter. */
 	showMetadataPanel: boolean;
+	/** Project taxonomy frontmatter (subject, type) onto Confluence labels. */
+	mapTaxonomyToLabels: boolean;
 	/** Mirror the vault folder hierarchy as nested Confluence pages. */
 	preserveFolderStructure: boolean;
 	/** What to do with a Confluence page whose source note was deleted/unpublished. */
@@ -159,6 +161,7 @@ export default class ConfluencePlugin extends Plugin {
 			this.app,
 		);
 		this.adaptor.showMetadataPanel = this.settings.showMetadataPanel;
+		this.adaptor.mapTaxonomyToLabels = this.settings.mapTaxonomyToLabels;
 		this.adaptor.preserveFolderStructure = this.settings.preserveFolderStructure;
 
 		const quality = this.settings.mermaidQuality || "high";
@@ -880,6 +883,7 @@ export default class ConfluencePlugin extends Plugin {
 				deduplicateTitles: true,
 				skipUnchanged: true,
 				showMetadataPanel: true,
+				mapTaxonomyToLabels: false,
 				preserveFolderStructure: true,
 				onDeletedNote: "off" as DeletedNoteAction,
 				maxDeletePerPublish: 25,

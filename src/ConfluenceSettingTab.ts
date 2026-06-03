@@ -191,6 +191,18 @@ export class ConfluenceSettingTab extends PluginSettingTab {
 			);
 
 		new Setting(containerEl)
+			.setName("Taxonomy terms as labels")
+			.setDesc("Project each note's taxonomy frontmatter (subject + type) onto Confluence labels, so the terms become clickable and feed label search, the Content by Label macro, and label pages. Terms are slugified (\"Machine Learning\" → machine-learning). Note: on publish the library replaces a page's labels with this set, so labels added by hand in Confluence will be removed.")
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.plugin.settings.mapTaxonomyToLabels)
+					.onChange(async (value) => {
+						this.plugin.settings.mapTaxonomyToLabels = value;
+						await this.plugin.saveSettings();
+					}),
+			);
+
+		new Setting(containerEl)
 			.setName("Mermaid diagram quality")
 			.setDesc("PNG export quality for Mermaid diagrams (higher = better quality, larger files).")
 			.addDropdown((dropdown) => {

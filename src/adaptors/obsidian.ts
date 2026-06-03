@@ -13,6 +13,11 @@ import { lookup } from "mime-types";
 import SparkMD5 from "spark-md5";
 import { preprocessLatex } from "../LatexPreprocessor";
 import {
+	deriveTaxonomyLabels,
+	mergeTags,
+	type TaxonomyLabelField,
+} from "../taxonomyLabels";
+import {
 	deriveStructure,
 	computeFolderTitles,
 	buildTree,
@@ -50,6 +55,13 @@ const META_REL_FIELDS: [string, string][] = [
 	["capabilities", "Capabilities"],
 	["external_interfaces", "External interfaces"],
 ];
+
+/**
+ * Frontmatter fields projected onto Confluence labels when `mapTaxonomyToLabels`
+ * is on. Categorical facets only — `id` is unique-per-page and the relationship
+ * fields are page links, neither of which makes a useful navigational label.
+ */
+const TAXONOMY_LABEL_FIELDS: readonly TaxonomyLabelField[] = ["subject", "type"];
 
 function fmList(v: unknown): string[] {
 	if (v == null) return [];
@@ -168,6 +180,8 @@ export default class ObsidianAdaptor implements LoaderAdaptor {
 	private idToTitle: Map<string, string> = new Map();
 	/** Set by the plugin: emit a Page Properties panel from frontmatter. */
 	showMetadataPanel = false;
+	/** Set by the plugin: project taxonomy frontmatter onto Confluence labels. */
+	mapTaxonomyToLabels = false;
 	/** Set by the plugin: preserve the vault folder hierarchy in Confluence. */
 	preserveFolderStructure = true;
 	/** Global folder structure (commonPath, folders, landing files), per publish. */
@@ -296,13 +310,17 @@ export default class ObsidianAdaptor implements LoaderAdaptor {
 			console.log(`[Confluence] Deduplicating ${this.dedupMap.size} colliding page title(s)`);
 		}
 
-		// Folder structure (computed over the WHOLE set so it is stable across
-		// batches). Folder titles are deduped against the file titles too.
+		// Folder structure, rooted at the configured publish scope (folderToPublish)
+		// — NOT the common path of the file set, which shifts as files are added or
+		// removed and collapses shared folders onto the parent page (the "two
+		// separate trees" bug). Rooting at the fixed scope keeps the hierarchy
+		// stable across batches and runs. Folder titles are deduped against the
+		// file titles too.
 		this.structure = undefined;
 		this.folderTitleByPath.clear();
 		this.landingToFolderTitle.clear();
 		if (this.preserveFolderStructure && paths.length > 0) {
-			const structure = deriveStructure(paths);
+			const structure = deriveStructure(paths, this.settings.folderToPublish);
 			this.folderTitleByPath = computeFolderTitles(
 				structure.folders,
 				this.publishTitleByPath.values(),
@@ -475,7 +493,17 @@ export default class ObsidianAdaptor implements LoaderAdaptor {
 		// pageTitle), so fold that in — otherwise a folder-title change (e.g. a new
 		// colliding sibling) wouldn't trigger a republish of the landing page.
 		const folderTitle = this.landingToFolderTitle.get(absoluteFilePath) ?? "";
-		return SparkMD5.hash(`${md.pageTitle} ${folderTitle} ${md.contents}`);
+		// Fold the published label set into the hash so a taxonomy-only change (which,
+		// with the metadata panel off, wouldn't touch `contents`) still triggers a
+		// republish to re-sync labels. Sorted for stability; only appended when there
+		// are tags, so tagless notes keep their existing hash (no mass re-publish).
+		const tags = Array.isArray(md.frontmatter?.tags)
+			? (md.frontmatter.tags as unknown[])
+					.filter((t): t is string => typeof t === "string")
+					.sort()
+			: [];
+		const base = `${md.pageTitle} ${folderTitle} ${md.contents}`;
+		return SparkMD5.hash(tags.length ? `${base} tags=${tags.join(",")}` : base);
 	}
 
 	async getMarkdownFilesToUpload(): Promise<FilesToUpload> {
@@ -541,6 +569,18 @@ export default class ObsidianAdaptor implements LoaderAdaptor {
 		if (this.showMetadataPanel) {
 			const block = this.buildMetadataBlock(frontMatter, file.path);
 			if (block) contents = insertAfterFrontmatter(contents, block);
+		}
+
+		// Project taxonomy frontmatter onto Confluence labels (clickable/filterable,
+		// unlike the read-only metadata panel). The library publishes whatever ends
+		// up in `frontmatter.tags` as labels, so we merge derived slugs in there —
+		// preserving any author-set `tags`. The label set also feeds computePublishHash
+		// so a taxonomy-only edit still triggers a republish to re-sync labels.
+		if (this.mapTaxonomyToLabels) {
+			const derived = deriveTaxonomyLabels(parsedFrontMatter, TAXONOMY_LABEL_FIELDS);
+			if (derived.length) {
+				parsedFrontMatter.tags = mergeTags(parsedFrontMatter.tags, derived);
+			}
 		}
 
 		// Obsidian-specific syntax the library's CommonMark parser can't handle.

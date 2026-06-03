@@ -10,8 +10,13 @@
  * (`architecture`, `knowledge`, `README`…) collide across the corpus.
  *
  * This module rebuilds the tree with:
- *   - a STABLE root = the common path of the WHOLE publishable set (so every
- *     batch nests identically), and
+ *   - a STABLE root = the configured publish scope (`folderToPublish`), which
+ *     maps onto the Confluence parent page. This is fixed regardless of which
+ *     files are publishable, so every batch — and every separate publish run —
+ *     nests identically. (Rooting at the *common path of the file set* instead,
+ *     as an earlier version did, was the bug: that prefix shifts as files are
+ *     added/removed, collapsing shared folders onto the parent and hoisting
+ *     their subfolders to the top — the "two separate trees" report.)
  *   - globally-unique, parent-qualified folder titles (so folders reconcile by
  *     title across batches instead of merging), and
  *   - README / index / eponymous file promotion to the folder's landing page.
@@ -78,6 +83,8 @@ export interface FolderInfo {
 }
 
 export interface DerivedStructure {
+	/** The publish-scope root that maps onto the Confluence parent page; all
+	 * structure is relative to it. "" = vault root (publish everything). */
 	commonPath: string;
 	/** All intermediate folders (relative to commonPath), parent-before-child. */
 	folders: FolderInfo[];
@@ -93,9 +100,19 @@ const INDEX_BASENAMES = new Set(["index", "readme"]);
  * Derive the folder hierarchy + per-folder landing file from the FULL set of
  * publishable file paths. Computed once over everything so the result is stable
  * regardless of which subset a batch publishes.
+ *
+ * `root` is the publish scope (the `folderToPublish` setting) that maps onto the
+ * Confluence parent page; all structure is computed relative to it. It is
+ * normalised (leading/trailing/empty segments stripped), so "", "/", and
+ * "Confluence Pages/" all behave sensibly. Pass it explicitly in production —
+ * the default (common path of the file set) is a convenience for tests and is
+ * NOT set-stable (see the module header).
  */
-export function deriveStructure(allFilePaths: string[]): DerivedStructure {
-	const commonPath = commonPathOf(allFilePaths);
+export function deriveStructure(
+	allFilePaths: string[],
+	root: string = commonPathOf(allFilePaths),
+): DerivedStructure {
+	const commonPath = splitPath(root).join("/");
 	const folders = new Map<string, FolderInfo>();
 	const folderOfFile = new Map<string, string>();
 	const filesInFolder = new Map<string, string[]>();
