@@ -12,6 +12,7 @@
 import { Publisher } from "@markdown-confluence/lib";
 import { ensureAllFilesExistInConfluence } from "@markdown-confluence/lib/dist/TreeConfluence.js";
 import type ObsidianAdaptor from "./adaptors/obsidian";
+import { planReparents } from "./reparent";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Any = any;
@@ -55,7 +56,7 @@ export class StructuredPublisher extends Publisher {
 		const folderTree = await this.structuredAdaptor.buildLocalAdfTree(files, settings);
 		// ─────────────────────────────────────────────────────────────────────
 
-		let confluencePagesToPublish = await ensureAllFilesExistInConfluence(
+		const allPages = await ensureAllFilesExistInConfluence(
 			self.confluenceClient,
 			self.adaptor,
 			folderTree,
@@ -65,13 +66,56 @@ export class StructuredPublisher extends Publisher {
 			settings,
 		);
 
+		let confluencePagesToPublish = allPages;
 		if (publishFilter) {
-			confluencePagesToPublish = confluencePagesToPublish.filter(
+			confluencePagesToPublish = allPages.filter(
 				(file: Any) => file.file.absoluteFilePath === publishFilter,
 			);
 		}
 
 		const adrFileTasks = confluencePagesToPublish.map((file: Any) => self.publishFile(file));
-		return await Promise.all(adrFileTasks);
+		const results = await Promise.all(adrFileTasks);
+
+		// Data Center fix for the folder-under-folder bug: this DC doesn't apply the
+		// `ancestors` field reliably (observed ignored on both create AND update), so
+		// child folders land flat under the parent page — even brand-new ones. Re-parent
+		// every mis-placed page explicitly via the move endpoint, comparing each page's
+		// actual current parent to its intended one. Runs over the FULL tree (not the
+		// publishFilter subset) so folder pages are fixed even on a single-file publish.
+		await this.enforceParentHierarchy(allPages, self.confluenceClient);
+
+		return results;
+	}
+
+	/**
+	 * Move any page whose current parent differs from its intended parent under the
+	 * correct one, via `PUT /content/{id}/move/append/{targetId}`. The decision is
+	 * made by the pure, harness-tested `planReparents`. Failures are logged (an older
+	 * DC could lack the move endpoint, like archive) rather than aborting the publish.
+	 */
+	private async enforceParentHierarchy(nodes: Any[], client: Any): Promise<void> {
+		const moves = planReparents(nodes);
+		if (moves.length === 0) return;
+		let moved = 0;
+		let failed = 0;
+		for (const m of moves) {
+			try {
+				await client.sendRequest({
+					url: `/api/content/${m.pageId}/move/append/${m.targetId}`,
+					method: "PUT",
+				});
+				moved++;
+			} catch (e) {
+				failed++;
+				console.warn(
+					`[Confluence] Could not re-parent "${m.title}" (${m.pageId}) under ${m.targetId}:`,
+					e,
+				);
+			}
+		}
+		console.log(
+			`[Confluence] Folder hierarchy: re-parented ${moved}/${moves.length} page(s) via move endpoint` +
+			(failed ? ` — ${failed} FAILED (move endpoint may be unavailable on this Confluence)` : ""),
+		);
 	}
 }
