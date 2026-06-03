@@ -395,6 +395,24 @@ export default class ObsidianAdaptor implements LoaderAdaptor {
 			convertFile: (mf) => convertMDtoADF(mf, settings),
 		});
 		assertUniqueTitles(tree); // the safety check the library's tree builder runs
+
+		// TEMP diagnostic — dump the resolved hierarchy + rooting so we can see whether
+		// the tree we hand the library is nested or flat. Remove once folder-structure
+		// publishing is confirmed working.
+		const renderTree = (node: FolderTreeNode, depth: number): string => {
+			const title = depth === 0 ? "(root → Confluence parent page)" : (node.file?.pageTitle ?? node.name);
+			const kind = node.file?.absoluteFilePath?.startsWith("__folder__/") ? " [folder]" : node.file ? " [file]" : "";
+			return [
+				`[Confluence][tree] ${"    ".repeat(depth)}${title}${kind}`,
+				...node.children.map((c) => renderTree(c, depth + 1)),
+			].join("\n");
+		};
+		console.log(
+			`[Confluence][tree] preserveFolderStructure=${this.preserveFolderStructure} ` +
+			`folderToPublish=${JSON.stringify(this.settings.folderToPublish)} ` +
+			`commonPath=${JSON.stringify(structure.commonPath)} files=${allFiles.length}\n` +
+			renderTree(tree, 0),
+		);
 		return tree;
 	}
 
