@@ -55,7 +55,7 @@ export class StructuredPublisher extends Publisher {
 		const folderTree = await this.structuredAdaptor.buildLocalAdfTree(files, settings);
 		// ─────────────────────────────────────────────────────────────────────
 
-		let confluencePagesToPublish = await ensureAllFilesExistInConfluence(
+		const allPages = await ensureAllFilesExistInConfluence(
 			self.confluenceClient,
 			self.adaptor,
 			folderTree,
@@ -65,13 +65,64 @@ export class StructuredPublisher extends Publisher {
 			settings,
 		);
 
+		let confluencePagesToPublish = allPages;
 		if (publishFilter) {
-			confluencePagesToPublish = confluencePagesToPublish.filter(
+			confluencePagesToPublish = allPages.filter(
 				(file: Any) => file.file.absoluteFilePath === publishFilter,
 			);
 		}
 
 		const adrFileTasks = confluencePagesToPublish.map((file: Any) => self.publishFile(file));
-		return await Promise.all(adrFileTasks);
+		const results = await Promise.all(adrFileTasks);
+
+		// Data Center fix: Confluence Server/DC ignores the `ancestors` field on
+		// content create/update, so the nested tree we send otherwise lands FLAT
+		// under the parent page. (Same class of DC quirk this client already works
+		// around for ADF→storage conversion and attachment PUT→POST.) Enforce the
+		// intended hierarchy explicitly via the move endpoint. Runs over the FULL
+		// tree — not the publishFilter subset — so folder pages get parented too.
+		await this.enforceParentHierarchy(allPages, self.confluenceClient);
+
+		return results;
+	}
+
+	/**
+	 * Force each page under its intended parent via `PUT /content/{id}/move/append/{targetId}`,
+	 * because Data Center ignores `ancestors` on create/update. Skips pages already
+	 * correctly parented (by comparing intended vs. current direct parent), and walks
+	 * parent-before-child (flattenTree order) so a parent exists before its children
+	 * are appended. Failures are logged, not fatal — if an older DC lacks the move
+	 * endpoint we surface it rather than silently flattening.
+	 */
+	private async enforceParentHierarchy(nodes: Any[], client: Any): Promise<void> {
+		let moved = 0;
+		let failed = 0;
+		for (const node of nodes) {
+			const chain: string[] = node.ancestors ?? [];
+			const pageId: string | undefined = node.file?.pageId;
+			if (chain.length === 0 || !pageId) continue; // root carrier / unresolved
+			const intendedParent = chain[chain.length - 1];
+			const existing = node.existingPageData?.ancestors ?? [];
+			const currentParent = existing.length ? existing[existing.length - 1]?.id : undefined;
+			if (!intendedParent || String(currentParent) === String(intendedParent)) continue;
+			try {
+				await client.sendRequest({
+					url: `/api/content/${pageId}/move/append/${intendedParent}`,
+					method: "PUT",
+				});
+				moved++;
+			} catch (e) {
+				failed++;
+				console.warn(
+					`[Confluence] Could not re-parent "${node.file?.pageTitle}" (${pageId}) under ${intendedParent}:`,
+					e,
+				);
+			}
+		}
+		if (moved || failed) {
+			console.log(
+				`[Confluence] Data Center re-parent pass: ${moved} page(s) moved${failed ? `, ${failed} failed (move endpoint may be unavailable)` : ""}.`,
+			);
+		}
 	}
 }
