@@ -310,17 +310,13 @@ export default class ObsidianAdaptor implements LoaderAdaptor {
 			console.log(`[Confluence] Deduplicating ${this.dedupMap.size} colliding page title(s)`);
 		}
 
-		// Folder structure, rooted at the configured publish scope (folderToPublish)
-		// — NOT the common path of the file set, which shifts as files are added or
-		// removed and collapses shared folders onto the parent page (the "two
-		// separate trees" bug). Rooting at the fixed scope keeps the hierarchy
-		// stable across batches and runs. Folder titles are deduped against the
-		// file titles too.
+		// Folder structure (computed over the WHOLE set so it is stable across
+		// batches). Folder titles are deduped against the file titles too.
 		this.structure = undefined;
 		this.folderTitleByPath.clear();
 		this.landingToFolderTitle.clear();
 		if (this.preserveFolderStructure && paths.length > 0) {
-			const structure = deriveStructure(paths, this.settings.folderToPublish);
+			const structure = deriveStructure(paths);
 			this.folderTitleByPath = computeFolderTitles(
 				structure.folders,
 				this.publishTitleByPath.values(),
@@ -395,24 +391,6 @@ export default class ObsidianAdaptor implements LoaderAdaptor {
 			convertFile: (mf) => convertMDtoADF(mf, settings),
 		});
 		assertUniqueTitles(tree); // the safety check the library's tree builder runs
-
-		// TEMP diagnostic — dump the resolved hierarchy + rooting so we can see whether
-		// the tree we hand the library is nested or flat. Remove once folder-structure
-		// publishing is confirmed working.
-		const renderTree = (node: FolderTreeNode, depth: number): string => {
-			const title = depth === 0 ? "(root → Confluence parent page)" : (node.file?.pageTitle ?? node.name);
-			const kind = node.file?.absoluteFilePath?.startsWith("__folder__/") ? " [folder]" : node.file ? " [file]" : "";
-			return [
-				`[Confluence][tree] ${"    ".repeat(depth)}${title}${kind}`,
-				...node.children.map((c) => renderTree(c, depth + 1)),
-			].join("\n");
-		};
-		console.log(
-			`[Confluence][tree] preserveFolderStructure=${this.preserveFolderStructure} ` +
-			`folderToPublish=${JSON.stringify(this.settings.folderToPublish)} ` +
-			`commonPath=${JSON.stringify(structure.commonPath)} files=${allFiles.length}\n` +
-			renderTree(tree, 0),
-		);
 		return tree;
 	}
 
@@ -520,17 +498,8 @@ export default class ObsidianAdaptor implements LoaderAdaptor {
 					.filter((t): t is string => typeof t === "string")
 					.sort()
 			: [];
-		// Fold the file's folder position (relative to the publish-scope root) into
-		// the hash so a structural MOVE — e.g. the folder-hierarchy rooting fix
-		// re-parenting a page — triggers a republish on its own. Skip-unchanged
-		// otherwise compares only title/content, so a page that needs to move to a
-		// new parent (same title + body) is skipped and stranded in its old place.
-		// Appended only when non-empty, so root-level files don't needlessly churn.
-		const folderRel = this.structure?.folderOfFile.get(absoluteFilePath) ?? "";
-		let base = `${md.pageTitle} ${folderTitle} ${md.contents}`;
-		if (folderRel) base += ` @${folderRel}`;
-		if (tags.length) base += ` tags=${tags.join(",")}`;
-		return SparkMD5.hash(base);
+		const base = `${md.pageTitle} ${folderTitle} ${md.contents}`;
+		return SparkMD5.hash(tags.length ? `${base} tags=${tags.join(",")}` : base);
 	}
 
 	async getMarkdownFilesToUpload(): Promise<FilesToUpload> {
