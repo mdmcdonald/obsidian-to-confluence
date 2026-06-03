@@ -502,8 +502,17 @@ export default class ObsidianAdaptor implements LoaderAdaptor {
 					.filter((t): t is string => typeof t === "string")
 					.sort()
 			: [];
-		const base = `${md.pageTitle} ${folderTitle} ${md.contents}`;
-		return SparkMD5.hash(tags.length ? `${base} tags=${tags.join(",")}` : base);
+		// Fold the file's folder position (relative to the publish-scope root) into
+		// the hash so a structural MOVE — e.g. the folder-hierarchy rooting fix
+		// re-parenting a page — triggers a republish on its own. Skip-unchanged
+		// otherwise compares only title/content, so a page that needs to move to a
+		// new parent (same title + body) is skipped and stranded in its old place.
+		// Appended only when non-empty, so root-level files don't needlessly churn.
+		const folderRel = this.structure?.folderOfFile.get(absoluteFilePath) ?? "";
+		let base = `${md.pageTitle} ${folderTitle} ${md.contents}`;
+		if (folderRel) base += ` @${folderRel}`;
+		if (tags.length) base += ` tags=${tags.join(",")}`;
+		return SparkMD5.hash(base);
 	}
 
 	async getMarkdownFilesToUpload(): Promise<FilesToUpload> {

@@ -19,7 +19,10 @@
       "Bash(git push:*)",
       "Bash(npm run build:*)",
       "Bash(node -e:*)",
-      "WebSearch"
+      "WebSearch",
+      "Bash(find /Users/martin -maxdepth 4 -name \"node\" -type f 2>/dev/null | head -5; echo \"---\"; ls /usr/local/bin/ 2>/dev/null | grep -E \"^\\(node|npm|tsc\\)\")",
+      "Read(//Users/martin/**)",
+      "Read(//usr/local/**)"
     ]
   }
 }
