@@ -3,7 +3,7 @@
 	"name": "Confluence Integration",
 	"version": "5.8.0",
 	"minAppVersion": "1.5.0",
-	"description": "This plugin allows you to publish your notes to Confluence",
+	"description": "Publish Obsidian notes to Confluence Data Center 9.2",
 	"author": "aaronsb",
 	"authorUrl": "https://github.com/aaronsb",
 	"isDesktopOnly": true

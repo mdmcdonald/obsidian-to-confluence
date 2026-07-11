@@ -1,29 +1,7 @@
 import { Modal, App } from "obsidian";
 import { createRoot, Root } from "react-dom/client";
 import React, { useState } from "react";
-import { UploadAdfFileResult } from "@markdown-confluence/lib";
-import { TitleRename } from "./adaptors/obsidian";
-
-export interface FailedFile {
-	fileName: string;
-	reason: string;
-}
-
-export interface OrphanSummary {
-	action: string;
-	ok: number;
-	failed: number;
-	ids: string[];
-}
-
-export interface UploadResults {
-	errorMessage: string | null;
-	failedFiles: FailedFile[];
-	filesUploadResult: UploadAdfFileResult[];
-	renamedFiles: TitleRename[];
-	skipped?: number;
-	orphansHandled?: OrphanSummary | null;
-}
+import type { UploadResults } from "./publishResults";
 
 export interface UploadResultsProps {
 	uploadResults: UploadResults;
@@ -51,9 +29,7 @@ const CompletedView: React.FC<UploadResultsProps> = ({ uploadResults }) => {
 			.filter((result) => result[`${type}Result`] === "updated")
 			.map((result, index) => (
 				<li key={index}>
-					<a href={result.adfFile.pageUrl}>
-						{result.adfFile.absoluteFilePath}
-					</a>
+					<a href={result.adfFile.pageUrl}>{result.adfFile.absoluteFilePath}</a>
 				</li>
 			));
 	};
@@ -68,16 +44,36 @@ const CompletedView: React.FC<UploadResultsProps> = ({ uploadResults }) => {
 				<h1>Confluence Publish</h1>
 			</div>
 			{errorMessage ? (
-				<div className="error-message" style={{ border: "1px solid #e74c3c", padding: "12px", borderRadius: "4px", marginBottom: "12px", backgroundColor: "rgba(231, 76, 60, 0.1)" }}>
+				<div
+					className="error-message"
+					style={{
+						border: "1px solid #e74c3c",
+						padding: "12px",
+						borderRadius: "4px",
+						marginBottom: "12px",
+						backgroundColor: "rgba(231, 76, 60, 0.1)",
+					}}
+				>
 					<h3 style={{ color: "#e74c3c", marginTop: 0 }}>Publish Failed</h3>
 					<p style={{ whiteSpace: "pre-wrap", fontFamily: "monospace", fontSize: "12px" }}>{errorMessage}</p>
-					<p style={{ fontSize: "12px", opacity: 0.7 }}>Check the developer console (Ctrl+Shift+I) for detailed logs.</p>
+					<p style={{ fontSize: "12px", opacity: 0.7 }}>
+						Check the developer console (Ctrl+Shift+I) for detailed logs.
+					</p>
 				</div>
 			) : (
 				<>
 					{/* Show failures first and prominently if any exist */}
 					{hasFailures && (
-						<div className="failed-uploads" style={{ border: "1px solid #e74c3c", padding: "12px", borderRadius: "4px", marginBottom: "12px", backgroundColor: "rgba(231, 76, 60, 0.1)" }}>
+						<div
+							className="failed-uploads"
+							style={{
+								border: "1px solid #e74c3c",
+								padding: "12px",
+								borderRadius: "4px",
+								marginBottom: "12px",
+								backgroundColor: "rgba(231, 76, 60, 0.1)",
+							}}
+						>
 							<h3 style={{ color: "#e74c3c", marginTop: 0 }}>
 								{hasSuccesses
 									? `${failedFiles.length} of ${totalFiles} file(s) failed`
@@ -85,15 +81,27 @@ const CompletedView: React.FC<UploadResultsProps> = ({ uploadResults }) => {
 							</h3>
 							<ul style={{ listStyle: "none", padding: 0 }}>
 								{failedFiles.map((file, index) => (
-									<li key={index} style={{ marginBottom: "8px", padding: "8px", backgroundColor: "rgba(0,0,0,0.05)", borderRadius: "4px" }}>
+									<li
+										key={index}
+										style={{
+											marginBottom: "8px",
+											padding: "8px",
+											backgroundColor: "rgba(0,0,0,0.05)",
+											borderRadius: "4px",
+										}}
+									>
 										<strong>{file.fileName}</strong>
-										<p style={{ margin: "4px 0 0 0", whiteSpace: "pre-wrap", fontFamily: "monospace", fontSize: "11px" }}>
+										<p
+											style={{ margin: "4px 0 0 0", whiteSpace: "pre-wrap", fontFamily: "monospace", fontSize: "11px" }}
+										>
 											{file.reason}
 										</p>
 									</li>
 								))}
 							</ul>
-							<p style={{ fontSize: "12px", opacity: 0.7 }}>Check the developer console (Ctrl+Shift+I) for detailed API logs.</p>
+							<p style={{ fontSize: "12px", opacity: 0.7 }}>
+								Check the developer console (Ctrl+Shift+I) for detailed API logs.
+							</p>
 						</div>
 					)}
 
@@ -112,13 +120,20 @@ const CompletedView: React.FC<UploadResultsProps> = ({ uploadResults }) => {
 					)}
 
 					{orphansHandled && orphansHandled.ids.length > 0 && (
-						<div className="orphaned-pages" style={{ border: "1px solid #e67e22", padding: "12px", borderRadius: "4px", marginBottom: "12px", backgroundColor: "rgba(230, 126, 34, 0.08)" }}>
+						<div
+							className="orphaned-pages"
+							style={{
+								border: "1px solid #e67e22",
+								padding: "12px",
+								borderRadius: "4px",
+								marginBottom: "12px",
+								backgroundColor: "rgba(230, 126, 34, 0.08)",
+							}}
+						>
 							<h3 style={{ color: "#e67e22", marginTop: 0 }}>
 								{orphansHandled.action === "report"
 									? `${orphansHandled.ids.length} orphaned page(s) detected — not removed`
-									: orphansHandled.action === "archive"
-										? `${orphansHandled.ok} page(s) archived (source note removed)`
-										: `${orphansHandled.ok} page(s) trashed (source note removed)`}
+									: `${orphansHandled.ok} page(s) trashed (source note removed)`}
 							</h3>
 							{orphansHandled.failed > 0 && (
 								<p style={{ fontSize: "12px", color: "#e74c3c" }}>
@@ -132,12 +147,22 @@ const CompletedView: React.FC<UploadResultsProps> = ({ uploadResults }) => {
 					)}
 
 					{renamedFiles && renamedFiles.length > 0 && (
-						<div className="renamed-files" style={{ border: "1px solid #3498db", padding: "12px", borderRadius: "4px", marginBottom: "12px", backgroundColor: "rgba(52, 152, 219, 0.08)" }}>
+						<div
+							className="renamed-files"
+							style={{
+								border: "1px solid #3498db",
+								padding: "12px",
+								borderRadius: "4px",
+								marginBottom: "12px",
+								backgroundColor: "rgba(52, 152, 219, 0.08)",
+							}}
+						>
 							<h3 style={{ color: "#3498db", marginTop: 0 }}>
 								{renamedFiles.length} file(s) renamed to avoid title collisions
 							</h3>
 							<p style={{ fontSize: "12px", marginBottom: "8px", opacity: 0.8 }}>
-								Multiple notes mapped to the same Confluence page title. Each was given a short hash suffix derived from its vault path.
+								Multiple notes mapped to the same Confluence page title. Each was given a short hash suffix derived from
+								its vault path.
 							</p>
 							<button onClick={() => setRenamesExpanded(!renamesExpanded)} style={{ marginBottom: "8px" }}>
 								{renamesExpanded ? "Hide" : "Show"} renames
@@ -145,7 +170,15 @@ const CompletedView: React.FC<UploadResultsProps> = ({ uploadResults }) => {
 							{renamesExpanded && (
 								<ul style={{ listStyle: "none", padding: 0, fontSize: "12px", fontFamily: "monospace" }}>
 									{renamedFiles.map((r, index) => (
-										<li key={index} style={{ marginBottom: "6px", padding: "4px 8px", backgroundColor: "rgba(0,0,0,0.04)", borderRadius: "3px" }}>
+										<li
+											key={index}
+											style={{
+												marginBottom: "6px",
+												padding: "4px 8px",
+												backgroundColor: "rgba(0,0,0,0.04)",
+												borderRadius: "3px",
+											}}
+										>
 											<div>{r.filePath}</div>
 											<div style={{ marginLeft: "12px", opacity: 0.85 }}>
 												{r.originalTitle} → <strong>{r.renamedTitle}</strong>
@@ -158,9 +191,19 @@ const CompletedView: React.FC<UploadResultsProps> = ({ uploadResults }) => {
 					)}
 
 					{!hasSuccesses && !hasFailures && (
-						<div style={{ padding: "12px", border: "1px solid #f39c12", borderRadius: "4px", backgroundColor: "rgba(243, 156, 18, 0.1)" }}>
+						<div
+							style={{
+								padding: "12px",
+								border: "1px solid #f39c12",
+								borderRadius: "4px",
+								backgroundColor: "rgba(243, 156, 18, 0.1)",
+							}}
+						>
 							<h3 style={{ color: "#f39c12", marginTop: 0 }}>No files found to publish</h3>
-							<p>Check that your "Folder to Publish" setting is correct and that files have <code>connie-publish: true</code> in frontmatter or are in the configured folder.</p>
+							<p>
+								Check that your "Folder to Publish" setting is correct and that files have{" "}
+								<code>connie-publish: true</code> in frontmatter or are in the configured folder.
+							</p>
 						</div>
 					)}
 
@@ -193,9 +236,7 @@ const CompletedView: React.FC<UploadResultsProps> = ({ uploadResults }) => {
 								</tbody>
 							</table>
 							<div className="expandable-section">
-								<button onClick={() => setExpanded(!expanded)}>
-									{expanded ? "Collapse" : "Expand"} Updated Files
-								</button>
+								<button onClick={() => setExpanded(!expanded)}>{expanded ? "Collapse" : "Expand"} Updated Files</button>
 								{expanded && (
 									<div className="updated-files">
 										<div className="updated-content">
@@ -233,9 +274,7 @@ export class CompletedModal extends Modal {
 	override onOpen() {
 		const { contentEl } = this;
 		this.root = createRoot(contentEl);
-		this.root.render(
-			React.createElement(CompletedView, this.uploadResults)
-		);
+		this.root.render(React.createElement(CompletedView, this.uploadResults));
 	}
 
 	override onClose() {

@@ -20,7 +20,6 @@
  * can be unit-tested without the library or Obsidian.
  */
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Any = any;
 
 export interface FolderTreeNode {
@@ -33,6 +32,18 @@ export interface FolderTreeNode {
 
 export function splitPath(p: string): string[] {
 	return p.split("/").filter((s) => s.length > 0);
+}
+
+/**
+ * Whether a vault file belongs to a configured publishing folder. Comparison is
+ * segment-aware: `Docs-old/page.md` is not inside `Docs`. Empty and `/` both
+ * mean the vault root for backwards compatibility with earlier documentation.
+ */
+export function isPathInFolder(filePath: string, folderPath: string): boolean {
+	const folder = splitPath(folderPath.trim()).join("/");
+	if (!folder) return true;
+	const file = splitPath(filePath).join("/");
+	return file === folder || file.startsWith(`${folder}/`);
 }
 
 /** Longest common leading SEGMENT prefix of the given paths (like the lib). */
@@ -140,8 +151,8 @@ export function deriveStructure(allFilePaths: string[]): DerivedStructure {
 	}
 
 	// Order folders parent-before-child for deterministic title assignment.
-	const ordered = [...folders.values()].sort((a, b) =>
-		a.segments.length - b.segments.length || a.relPath.localeCompare(b.relPath),
+	const ordered = [...folders.values()].sort(
+		(a, b) => a.segments.length - b.segments.length || a.relPath.localeCompare(b.relPath),
 	);
 
 	return { commonPath, folders: ordered, indexFileByFolder, folderOfFile };
@@ -169,10 +180,7 @@ function hash6(s: string): string {
  * (rather than letting the first keep the bare name) keeps a folder's title
  * stable when an unrelated sibling is added or removed.
  */
-export function computeFolderTitles(
-	folders: FolderInfo[],
-	takenTitles: Iterable<string>,
-): Map<string, string> {
+export function computeFolderTitles(folders: FolderInfo[], takenTitles: Iterable<string>): Map<string, string> {
 	const fileTitles = new Set<string>(takenTitles);
 	// Count how many folders share each bare basename.
 	const baseCount = new Map<string, number>();
@@ -276,7 +284,11 @@ export function buildTree(markdownFiles: Any[], ctx: BuildTreeContext): FolderTr
 			// The file IS the common path (single-file publish). Attach it as a
 			// direct child of the root using its basename.
 			const leafName = splitPath(f.absoluteFilePath).pop() ?? "page";
-			root.children.set(leafName, { name: leafName, children: new Map(), markdownFile: f });
+			root.children.set(leafName, {
+				name: leafName,
+				children: new Map(),
+				markdownFile: f,
+			});
 			continue;
 		}
 		let node = root;
@@ -290,7 +302,11 @@ export function buildTree(markdownFiles: Any[], ctx: BuildTreeContext): FolderTr
 			node = child;
 		}
 		const leafName = parts[parts.length - 1];
-		node.children.set(leafName, { name: leafName, children: new Map(), markdownFile: f });
+		node.children.set(leafName, {
+			name: leafName,
+			children: new Map(),
+			markdownFile: f,
+		});
 	}
 
 	// Ensure folder nodes exist for promoted landing files too (so the folder
@@ -324,9 +340,7 @@ export function buildTree(markdownFiles: Any[], ctx: BuildTreeContext): FolderTr
 			// Folder node — landing file becomes its page, else a blank placeholder.
 			const title = ctx.folderTitle.get(relPath) ?? raw.name;
 			const landingPath = ctx.indexFileByFolder.get(relPath);
-			const landingRaw = landingPath
-				? findPromotedSource(markdownFiles, landingPath)
-				: undefined;
+			const landingRaw = landingPath ? findPromotedSource(markdownFiles, landingPath) : undefined;
 			if (landingRaw) {
 				const converted = ctx.convertFile(landingRaw);
 				file = { ...converted, pageTitle: title };

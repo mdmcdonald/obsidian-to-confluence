@@ -6,9 +6,7 @@ import { Property } from "csstype";
 
 export type ConfluencePerPageUIValues = {
 	[K in keyof ConfluencePageConfig.ConfluencePerPageConfig]: {
-		value:
-			| ConfluencePageConfig.ConfluencePerPageConfig[K]["default"]
-			| undefined;
+		value: ConfluencePageConfig.ConfluencePerPageConfig[K]["default"] | undefined;
 		isSet: boolean;
 	};
 };
@@ -29,9 +27,7 @@ export function mapFrontmatterToConfluencePerPageUIValues(
 				key,
 				inputType,
 				default: defaultValue,
-			} = config[
-				propertyKey as keyof ConfluencePageConfig.ConfluencePerPageConfig
-			];
+			} = config[propertyKey as keyof ConfluencePageConfig.ConfluencePerPageConfig];
 			const frontmatterValue = frontmatter[key];
 
 			if (frontmatterValue !== undefined) {
@@ -43,13 +39,11 @@ export function mapFrontmatterToConfluencePerPageUIValues(
 				switch (inputType) {
 					case "options":
 					case "array-text":
-						result[propertyKey as keyof ConfluencePerPageUIValues] =
-							{ value: defaultValue as never, isSet: false };
+						result[propertyKey as keyof ConfluencePerPageUIValues] = { value: defaultValue as never, isSet: false };
 						break;
 					case "boolean":
 					case "text":
-						result[propertyKey as keyof ConfluencePerPageUIValues] =
-							{ value: undefined, isSet: false };
+						result[propertyKey as keyof ConfluencePerPageUIValues] = { value: undefined, isSet: false };
 						break;
 					default:
 						throw new Error("Missing case for inputType");
@@ -119,19 +113,9 @@ const renderTextInput = (
 				<input
 					type="text"
 					id={key}
-					value={
-						(values[key as keyof ConfluencePerPageUIValues]
-							.value as string) ?? ""
-					}
+					value={(values[key as keyof ConfluencePerPageUIValues].value as string) ?? ""}
 					onChange={(e: ChangeEvent<HTMLInputElement>) =>
-						handleChange(
-							key,
-							e.target.value,
-							config.inputValidator,
-							setValues,
-							setErrors,
-							false,
-						)
+						handleChange(key, e.target.value, config.inputValidator, setValues, setErrors, false)
 					}
 				/>
 			</td>
@@ -139,19 +123,9 @@ const renderTextInput = (
 				<input
 					type="checkbox"
 					id={`${key}-isSet`}
-					checked={
-						values[key as keyof ConfluencePerPageUIValues]
-							.isSet as boolean
-					}
+					checked={values[key as keyof ConfluencePerPageUIValues].isSet as boolean}
 					onChange={(e: ChangeEvent<HTMLInputElement>) =>
-						handleChange(
-							key,
-							e.target.checked,
-							config.inputValidator,
-							setValues,
-							setErrors,
-							true,
-						)
+						handleChange(key, e.target.checked, config.inputValidator, setValues, setErrors, true)
 					}
 				/>
 			</td>
@@ -184,48 +158,23 @@ const renderArrayText = (
 				<label htmlFor={key}>{config.key}</label>
 			</td>
 			<td>
-				{(
-					values[key as keyof ConfluencePerPageUIValues]
-						.value as unknown as string[]
-				).map((value, index) => (
+				{(values[key as keyof ConfluencePerPageUIValues].value as unknown as string[]).map((value, index) => (
 					<input
 						key={`${key}-${index}`}
 						type="text"
 						value={value}
 						onChange={(e: ChangeEvent<HTMLInputElement>) => {
-							const newArray = [
-								...(values[
-									key as keyof ConfluencePerPageUIValues
-								].value as unknown as string[]),
-							];
+							const newArray = [...(values[key as keyof ConfluencePerPageUIValues].value as unknown as string[])];
 							newArray[index] = e.target.value;
-							handleChange(
-								key,
-								newArray,
-								config.inputValidator,
-								setValues,
-								setErrors,
-								false,
-							);
+							handleChange(key, newArray, config.inputValidator, setValues, setErrors, false);
 						}}
 					/>
 				))}
 				<button
 					type="button"
 					onClick={() => {
-						const newArray = [
-							...(values[key as keyof ConfluencePerPageUIValues]
-								.value as string[]),
-							"",
-						];
-						handleChange(
-							key,
-							newArray,
-							config.inputValidator,
-							setValues,
-							setErrors,
-							false,
-						);
+						const newArray = [...(values[key as keyof ConfluencePerPageUIValues].value as string[]), ""];
+						handleChange(key, newArray, config.inputValidator, setValues, setErrors, false);
 					}}
 				>
 					+
@@ -235,19 +184,9 @@ const renderArrayText = (
 				<input
 					type="checkbox"
 					id={`${key}-isSet`}
-					checked={
-						values[key as keyof ConfluencePerPageUIValues]
-							.isSet as boolean
-					}
+					checked={values[key as keyof ConfluencePerPageUIValues].isSet as boolean}
 					onChange={(e: ChangeEvent<HTMLInputElement>) =>
-						handleChange(
-							key,
-							e.target.checked,
-							config.inputValidator,
-							setValues,
-							setErrors,
-							true,
-						)
+						handleChange(key, e.target.checked, config.inputValidator, setValues, setErrors, true)
 					}
 				/>
 			</td>
@@ -283,19 +222,9 @@ const renderBoolean = (
 				<input
 					type="checkbox"
 					id={key}
-					checked={
-						values[key as keyof ConfluencePerPageUIValues]
-							.value as boolean
-					}
+					checked={values[key as keyof ConfluencePerPageUIValues].value as boolean}
 					onChange={(e: ChangeEvent<HTMLInputElement>) =>
-						handleChange(
-							key,
-							e.target.checked,
-							config.inputValidator,
-							setValues,
-							setErrors,
-							false,
-						)
+						handleChange(key, e.target.checked, config.inputValidator, setValues, setErrors, false)
 					}
 				/>
 			</td>
@@ -303,19 +232,9 @@ const renderBoolean = (
 				<input
 					type="checkbox"
 					id={`${key}-isSet`}
-					checked={
-						values[key as keyof ConfluencePerPageUIValues]
-							.isSet as boolean
-					}
+					checked={values[key as keyof ConfluencePerPageUIValues].isSet as boolean}
 					onChange={(e: ChangeEvent<HTMLInputElement>) =>
-						handleChange(
-							key,
-							e.target.checked,
-							config.inputValidator,
-							setValues,
-							setErrors,
-							true,
-						)
+						handleChange(key, e.target.checked, config.inputValidator, setValues, setErrors, true)
 					}
 				/>
 			</td>
@@ -335,10 +254,7 @@ const renderBoolean = (
 );
 const renderOptions = (
 	key: string,
-	config: ConfluencePageConfig.FrontmatterConfig<
-		ConfluencePageConfig.PageContentType,
-		"options"
-	>,
+	config: ConfluencePageConfig.FrontmatterConfig<ConfluencePageConfig.PageContentType, "options">,
 	values: ConfluencePerPageUIValues,
 	errors: Record<string, Error[]>,
 	setValues: React.Dispatch<React.SetStateAction<ConfluencePerPageUIValues>>,
@@ -352,15 +268,11 @@ const renderOptions = (
 			<td>
 				<select
 					id={key}
-					value={
-						values[key as keyof ConfluencePerPageUIValues]
-							.value as ConfluencePageConfig.PageContentType
-					}
+					value={values[key as keyof ConfluencePerPageUIValues].value as ConfluencePageConfig.PageContentType}
 					onChange={(e: ChangeEvent<HTMLSelectElement>) =>
 						handleChange(
 							key,
-							e.target
-								.value as ConfluencePageConfig.PageContentType,
+							e.target.value as ConfluencePageConfig.PageContentType,
 							config.inputValidator,
 							setValues,
 							setErrors,
@@ -379,19 +291,9 @@ const renderOptions = (
 				<input
 					type="checkbox"
 					id={`${key}-isSet`}
-					checked={
-						values[key as keyof ConfluencePerPageUIValues]
-							.isSet as boolean
-					}
+					checked={values[key as keyof ConfluencePerPageUIValues].isSet as boolean}
 					onChange={(e: ChangeEvent<HTMLInputElement>) =>
-						handleChange(
-							key,
-							e.target.checked,
-							config.inputValidator,
-							setValues,
-							setErrors,
-							true,
-						)
+						handleChange(key, e.target.checked, config.inputValidator, setValues, setErrors, true)
 					}
 				/>
 			</td>
@@ -410,13 +312,8 @@ const renderOptions = (
 	</>
 );
 
-const ConfluenceForm: React.FC<FormProps> = ({
-	config,
-	initialValues,
-	onSubmit,
-}) => {
-	const [values, setValues] =
-		useState<ConfluencePerPageUIValues>(initialValues);
+const ConfluenceForm: React.FC<FormProps> = ({ config, initialValues, onSubmit }) => {
+	const [values, setValues] = useState<ConfluencePerPageUIValues>(initialValues);
 	const [errors, setErrors] = useState<Record<string, Error[]>>({});
 
 	const handleSubmit = (e: React.FormEvent) => {
@@ -441,10 +338,7 @@ const ConfluenceForm: React.FC<FormProps> = ({
 							case "text":
 								return renderTextInput(
 									key,
-									config as ConfluencePageConfig.FrontmatterConfig<
-										string,
-										"text"
-									>,
+									config as ConfluencePageConfig.FrontmatterConfig<string, "text">,
 									values,
 									errors,
 									setValues,
@@ -453,10 +347,7 @@ const ConfluenceForm: React.FC<FormProps> = ({
 							case "array-text":
 								return renderArrayText(
 									key,
-									config as ConfluencePageConfig.FrontmatterConfig<
-										string[],
-										"array-text"
-									>,
+									config as ConfluencePageConfig.FrontmatterConfig<string[], "array-text">,
 									values,
 									errors,
 									setValues,
@@ -465,10 +356,7 @@ const ConfluenceForm: React.FC<FormProps> = ({
 							case "boolean":
 								return renderBoolean(
 									key,
-									config as ConfluencePageConfig.FrontmatterConfig<
-										boolean,
-										"boolean"
-									>,
+									config as ConfluencePageConfig.FrontmatterConfig<boolean, "boolean">,
 									values,
 									errors,
 									setValues,
@@ -477,10 +365,7 @@ const ConfluenceForm: React.FC<FormProps> = ({
 							case "options":
 								return renderOptions(
 									key,
-									config as ConfluencePageConfig.FrontmatterConfig<
-										ConfluencePageConfig.PageContentType,
-										"options"
-									>,
+									config as ConfluencePageConfig.FrontmatterConfig<ConfluencePageConfig.PageContentType, "options">,
 									values,
 									errors,
 									setValues,

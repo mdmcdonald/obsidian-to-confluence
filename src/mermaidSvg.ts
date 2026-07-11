@@ -4,10 +4,7 @@
  */
 
 export function escapeXmlText(text: string): string {
-	return text
-		.replace(/&/g, "&amp;")
-		.replace(/</g, "&lt;")
-		.replace(/>/g, "&gt;");
+	return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
 /**
@@ -65,10 +62,7 @@ function getAttr(attrs: string, name: string): string | undefined {
  * HTML styling inside labels is lost; textual content (incl. <br> line breaks
  * and HTML entities like &amp;) survives.
  */
-export function replaceForeignObjects(
-	svg: string,
-	onReplaced?: (count: number) => void,
-): string {
+export function replaceForeignObjects(svg: string, onReplaced?: (count: number) => void): string {
 	if (!svg.includes("<foreignObject")) return svg;
 	let replaced = 0;
 	const out = svg.replace(
@@ -93,10 +87,7 @@ export function replaceForeignObjects(
 			const lineHeight = 16;
 			const startY = cy - (lineHeight * (lines.length - 1)) / 2;
 			const tspans = lines
-				.map(
-					(line, i) =>
-						`<tspan x="${cx}" y="${startY + i * lineHeight}">${escapeXmlText(line)}</tspan>`,
-				)
+				.map((line, i) => `<tspan x="${cx}" y="${startY + i * lineHeight}">${escapeXmlText(line)}</tspan>`)
 				.join("");
 			return `<text ${baseAttrs}>${tspans}</text>`;
 		},

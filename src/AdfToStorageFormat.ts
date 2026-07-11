@@ -3,8 +3,8 @@
  *
  * The @markdown-confluence/lib Publisher sends content as atlas_doc_format,
  * but many Confluence instances silently ignore it. This converter produces
- * the universally-supported storage (XHTML) format instead, without needing
- * to call any Confluence API endpoint.
+ * the documented Confluence Data Center 9.2 storage (XHTML) format instead,
+ * without needing to call any conversion endpoint.
  */
 
 import {
@@ -16,7 +16,6 @@ import {
 	MetaField,
 } from "./obsidianPreprocess";
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AdfNode = any;
 
 // Obsidian highlight ==text==. Confluence DC has no native highlight feature or
@@ -28,19 +27,32 @@ const HIGHLIGHT_OPEN = `<span style="background-color: rgb(255,248,179)">`;
 const HIGHLIGHT_CLOSE = `</span>`;
 
 function escapeHtml(text: string): string {
-	return text
-		.replace(/&/g, "&amp;")
-		.replace(/</g, "&lt;")
-		.replace(/>/g, "&gt;")
-		.replace(/"/g, "&quot;");
+	return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
 // Inline HTML the parser (html:false) hands us as literal text but which is
 // valid in Confluence storage format — authors use these in markdown (notably
 // <br> for line breaks in table cells, and <sub>/<sup> for technical notation).
 const SAFE_INLINE_HTML = new Set([
-	"br", "sub", "sup", "b", "strong", "i", "em", "u", "s", "del", "ins",
-	"kbd", "abbr", "mark", "small", "cite", "q", "var", "samp",
+	"br",
+	"sub",
+	"sup",
+	"b",
+	"strong",
+	"i",
+	"em",
+	"u",
+	"s",
+	"del",
+	"ins",
+	"kbd",
+	"abbr",
+	"mark",
+	"small",
+	"cite",
+	"q",
+	"var",
+	"samp",
 ]);
 // Only bare tags (optional whitespace + optional self-close), NOT attributes.
 // This deliberately does NOT match "<strong value>" so that prose like
@@ -81,9 +93,7 @@ function convertText(node: AdfNode): string {
 	// "latex-math-inline:" was produced by LatexPreprocessor. Emit the
 	// Appfire mathinline macro and skip the normal code wrapping.
 	const rawText: string = node.text ?? "";
-	const hasCodeMark =
-		Array.isArray(node.marks) &&
-		node.marks.some((m: AdfNode) => m?.type === "code");
+	const hasCodeMark = Array.isArray(node.marks) && node.marks.some((m: AdfNode) => m?.type === "code");
 
 	// Wikilink: an inline-code sentinel produced by preprocessWikilinks carrying
 	// the resolved Confluence page title / anchor / display. Emit an ac:link.
@@ -129,19 +139,12 @@ function renderWikilink(p: WikilinkPayload): string {
 	// removed (case + punctuation preserved) — verified against Atlassian DC
 	// docs. NB: fragile for headings with special characters, but the page
 	// link still resolves even when the anchor does not.
-	const anchorAttr = p.anchor
-		? ` ac:anchor="${escapeHtml(p.anchor.replace(/\s+/g, ""))}"`
-		: "";
+	const anchorAttr = p.anchor ? ` ac:anchor="${escapeHtml(p.anchor.replace(/\s+/g, ""))}"` : "";
 	if (p.kind === "anchor") {
 		// Same-page heading link — no <ri:page>.
 		return `<ac:link${anchorAttr}>${body}</ac:link>`;
 	}
-	return (
-		`<ac:link${anchorAttr}>` +
-		`<ri:page ri:content-title="${escapeHtml(p.title ?? "")}" />` +
-		body +
-		`</ac:link>`
-	);
+	return `<ac:link${anchorAttr}>` + `<ri:page ri:content-title="${escapeHtml(p.title ?? "")}" />` + body + `</ac:link>`;
 }
 
 /**
@@ -234,7 +237,10 @@ function convertInlineContent(content: AdfNode[] | undefined): string {
 		}
 		while (idx >= 0) {
 			if (idx > last) {
-				toks.push({ marker: false, node: { ...node, text: text.slice(last, idx) } });
+				toks.push({
+					marker: false,
+					node: { ...node, text: text.slice(last, idx) },
+				});
 			}
 			toks.push({ marker: true });
 			last = idx + 2;
@@ -292,7 +298,7 @@ function applyMark(mark: AdfNode, innerHtml: string): string {
 		case "code":
 			return `<code>${innerHtml}</code>`;
 		case "strike":
-			return `<s>${innerHtml}</s>`;
+			return `<span style="text-decoration: line-through;">${innerHtml}</span>`;
 		case "underline":
 			return `<u>${innerHtml}</u>`;
 		case "subsup":
@@ -316,9 +322,7 @@ function applyMark(mark: AdfNode, innerHtml: string): string {
 
 function convertCodeBlock(node: AdfNode): string {
 	const language = node.attrs?.language;
-	const code = node.content
-		?.map((child: AdfNode) => child.text ?? "")
-		.join("") ?? "";
+	const code = node.content?.map((child: AdfNode) => child.text ?? "").join("") ?? "";
 
 	// Metadata panel: a fenced sentinel produced from frontmatter by the adaptor.
 	// Emit a Confluence Page Properties (details) macro.
@@ -339,13 +343,11 @@ function convertCodeBlock(node: AdfNode): string {
 		);
 	}
 
-	const langParam = language
-		? `<ac:parameter ac:name="language">${escapeHtml(language)}</ac:parameter>`
-		: "";
+	const langParam = language ? `<ac:parameter ac:name="language">${escapeHtml(language)}</ac:parameter>` : "";
 	return (
 		`<ac:structured-macro ac:name="code">` +
 		langParam +
-		`<ac:plain-text-body><![CDATA[${code}]]></ac:plain-text-body>` +
+		`<ac:plain-text-body><![CDATA[${escapeCdataEnd(code)}]]></ac:plain-text-body>` +
 		`</ac:structured-macro>`
 	);
 }
@@ -358,14 +360,10 @@ let activeFileMap: Map<string, string> | undefined;
 function convertMedia(node: AdfNode): string {
 	const attrs = node.attrs ?? {};
 	let filename = attrs.__fileName || attrs.alt || "";
-	const width = attrs.width ? ` ac:width="${attrs.width}"` : "";
+	const width = attrs.width ? ` ac:width="${escapeHtml(String(attrs.width))}"` : "";
 
 	if (attrs.type === "external") {
-		return (
-			`<ac:image${width}>` +
-			`<ri:url ri:value="${escapeHtml(attrs.url ?? "")}" />` +
-			`</ac:image>`
-		);
+		return `<ac:image${width}>` + `<ri:url ri:value="${escapeHtml(attrs.url ?? "")}" />` + `</ac:image>`;
 	}
 
 	// If no filename, try resolving from the attachment file map (populated
@@ -374,16 +372,11 @@ function convertMedia(node: AdfNode): string {
 	if (!filename && attrs.id && activeFileMap) {
 		const lookupId = String(attrs.id);
 		filename = activeFileMap.get(lookupId) ?? "";
-		console.log(`[ADF→Storage] Media filename lookup: id="${lookupId}" → ${filename ? `"${filename}"` : "(not found)"}, map size=${activeFileMap.size}`);
 	}
 
 	// File attachment
 	if (filename) {
-		return (
-			`<ac:image${width}>` +
-			`<ri:attachment ri:filename="${escapeHtml(filename)}" />` +
-			`</ac:image>`
-		);
+		return `<ac:image${width}>` + `<ri:attachment ri:filename="${escapeHtml(filename)}" />` + `</ac:image>`;
 	}
 
 	// Fallback: no filename could be resolved
@@ -397,13 +390,31 @@ function convertMedia(node: AdfNode): string {
 // library pre-converts Obsidian callouts to panel nodes but collapses many
 // types (tip, abstract, todo, question, example, quote, bug, danger) to
 // "custom" before we see them, so those degrade to "info".
-const PANEL_TYPE_TO_DC_MACRO: Record<string, string> = {
+const CALLOUT_TYPE_TO_DC_MACRO: Record<string, string> = {
 	info: "info",
+	abstract: "info",
+	summary: "info",
+	tldr: "info",
+	example: "info",
 	note: "note",
+	todo: "note",
+	question: "note",
+	help: "note",
+	important: "note",
+	tip: "tip",
+	hint: "tip",
+	check: "tip",
+	done: "tip",
+	caution: "warning",
+	attention: "warning",
+	failure: "warning",
+	fail: "warning",
+	missing: "warning",
+	danger: "warning",
 	warning: "warning",
 	error: "warning",
+	bug: "warning",
 	success: "tip",
-	custom: "info",
 };
 
 /**
@@ -414,7 +425,10 @@ const PANEL_TYPE_TO_DC_MACRO: Record<string, string> = {
  * parameter so it renders in the panel header, matching convertCallout. Falls
  * back to leaving the node untouched for any shape we don't recognise.
  */
-function extractPanelTitle(node: AdfNode): { title: string | undefined; body: AdfNode } {
+function extractPanelTitle(node: AdfNode): {
+	title: string | undefined;
+	body: AdfNode;
+} {
 	const content = node.content;
 	if (!Array.isArray(content) || content.length === 0) return { title: undefined, body: node };
 	const first = content[0];
@@ -482,22 +496,17 @@ function stripLeadingMarker(node: AdfNode): AdfNode {
 		newInline = inline.slice(1);
 		if (newInline[0]?.type === "hardBreak") newInline = newInline.slice(1);
 	}
-	const newContent =
-		newInline.length > 0
-			? [{ ...first, content: newInline }, ...content.slice(1)]
-			: content.slice(1);
+	const newContent = newInline.length > 0 ? [{ ...first, content: newInline }, ...content.slice(1)] : content.slice(1);
 	return { ...node, content: newContent };
 }
 
 function convertPanel(node: AdfNode): string {
 	const panelType: string = node.attrs?.panelType ?? "info";
-	const macro = PANEL_TYPE_TO_DC_MACRO[panelType] ?? "info";
+	const macro = CALLOUT_TYPE_TO_DC_MACRO[panelType] ?? "info";
 	const extracted = extractPanelTitle(stripLeadingMarker(node));
 	const body = extracted.body;
 	const title = extracted.title !== undefined ? stripLeftoverCalloutMarker(extracted.title) : undefined;
-	const titleParam = title
-		? `<ac:parameter ac:name="title">${escapeHtml(title)}</ac:parameter>`
-		: "";
+	const titleParam = title ? `<ac:parameter ac:name="title">${escapeHtml(title)}</ac:parameter>` : "";
 	return (
 		`<ac:structured-macro ac:name="${macro}">` +
 		titleParam +
@@ -505,36 +514,6 @@ function convertPanel(node: AdfNode): string {
 		`</ac:structured-macro>`
 	);
 }
-
-// Obsidian callout type → Confluence built-in panel macro name.
-// Confluence DC has info / note / tip / warning as first-class macros;
-// anything not on that list maps to the closest fit.
-const CALLOUT_TYPE_MAP: Record<string, string> = {
-	info: "info",
-	abstract: "info",
-	summary: "info",
-	tldr: "info",
-	example: "info",
-	note: "note",
-	todo: "note",
-	question: "note",
-	help: "note",
-	important: "note",
-	tip: "tip",
-	hint: "tip",
-	success: "tip",
-	check: "tip",
-	done: "tip",
-	warning: "warning",
-	caution: "warning",
-	attention: "warning",
-	failure: "warning",
-	fail: "warning",
-	missing: "warning",
-	danger: "warning",
-	error: "warning",
-	bug: "warning",
-};
 
 /**
  * Detect an Obsidian callout encoded as a blockquote whose first paragraph
@@ -550,9 +529,7 @@ const CALLOUT_TYPE_MAP: Record<string, string> = {
  * original callout type directly (preserving e.g. `tip`, which the library
  * otherwise collapses to a generic "custom" panel).
  */
-function detectCallout(blockquote: AdfNode):
-	| { macro: string; title: string | undefined; body: AdfNode }
-	| null {
+function detectCallout(blockquote: AdfNode): { macro: string; title: string | undefined; body: AdfNode } | null {
 	const content = blockquote?.content;
 	if (!Array.isArray(content) || content.length === 0) return null;
 	const firstPara = content[0];
@@ -569,7 +546,7 @@ function detectCallout(blockquote: AdfNode):
 	// Unknown callout types fall back to an info panel (matching Obsidian, which
 	// renders an unrecognised [!type] as a default callout) rather than leaking
 	// the literal `[!type]` marker into the page as a plain blockquote.
-	const macro = CALLOUT_TYPE_MAP[calloutType] ?? "info";
+	const macro = CALLOUT_TYPE_TO_DC_MACRO[calloutType] ?? "info";
 
 	const restOfFirstLine = m[2].trim();
 	const remainderAfterMarker = firstText.text.substring(m[0].length).replace(/^\n/, "");
@@ -596,9 +573,7 @@ function detectCallout(blockquote: AdfNode):
 		}
 	}
 
-	const bodyContent = bodyFirstPara
-		? [bodyFirstPara, ...content.slice(1)]
-		: content.slice(1);
+	const bodyContent = bodyFirstPara ? [bodyFirstPara, ...content.slice(1)] : content.slice(1);
 
 	return {
 		macro,
@@ -608,9 +583,7 @@ function detectCallout(blockquote: AdfNode):
 }
 
 function convertCallout(macro: string, title: string | undefined, body: AdfNode): string {
-	const titleParam = title
-		? `<ac:parameter ac:name="title">${escapeHtml(title)}</ac:parameter>`
-		: "";
+	const titleParam = title ? `<ac:parameter ac:name="title">${escapeHtml(title)}</ac:parameter>` : "";
 	return (
 		`<ac:structured-macro ac:name="${macro}">` +
 		titleParam +
@@ -649,9 +622,7 @@ function convertExtension(node: AdfNode): string {
 		params += `<ac:parameter ac:name="${escapeHtml(key)}">${escapeHtml(String(value))}</ac:parameter>`;
 	}
 	const body =
-		node.content && node.content.length > 0
-			? `<ac:rich-text-body>${convertChildren(node)}</ac:rich-text-body>`
-			: "";
+		node.content && node.content.length > 0 ? `<ac:rich-text-body>${convertChildren(node)}</ac:rich-text-body>` : "";
 	return `<ac:structured-macro ac:name="${escapeHtml(String(macro))}">${params}${body}</ac:structured-macro>`;
 }
 
@@ -705,9 +676,7 @@ function convertTable(node: AdfNode): string {
 			ci += Math.max(1, cell.attrs?.colspan ?? 1);
 		});
 	});
-	const rightCol = dataCount.map(
-		(dc, ci) => dc >= 2 && (numeric[ci] ?? 0) >= dc * 0.6,
-	);
+	const rightCol = dataCount.map((dc, ci) => dc >= 2 && (numeric[ci] ?? 0) >= dc * 0.6);
 
 	const body = rows
 		.map((row) => {
@@ -741,6 +710,17 @@ function convertTableCell(tag: string, node: AdfNode, align?: string): string {
 	return `<${tag}${parts.join("")}>${convertInlineContent(node.content)}</${tag}>`;
 }
 
+const STATUS_COLOUR_TO_DC: Record<string, string> = {
+	neutral: "Grey",
+	grey: "Grey",
+	gray: "Grey",
+	red: "Red",
+	yellow: "Yellow",
+	green: "Green",
+	blue: "Blue",
+	purple: "Blue",
+};
+
 function convertNode(node: AdfNode): string {
 	if (!node || !node.type) return "";
 
@@ -762,7 +742,7 @@ function convertNode(node: AdfNode): string {
 		case "bulletList":
 			return `<ul>${convertChildren(node)}</ul>`;
 		case "orderedList":
-			return `<ol>${convertChildren(node)}</ol>`;
+			return `<ol${node.attrs?.order > 1 ? ` start="${Number(node.attrs.order)}"` : ""}>${convertChildren(node)}</ol>`;
 		case "listItem":
 			return `<li>${convertChildren(node)}</li>`;
 		case "blockquote": {
@@ -791,7 +771,7 @@ function convertNode(node: AdfNode): string {
 		case "inlineCard":
 			return `<a href="${escapeHtml(node.attrs?.url ?? "")}">${escapeHtml(node.attrs?.url ?? "")}</a>`;
 		case "emoji":
-			return node.attrs?.text ?? node.attrs?.shortName ?? "";
+			return escapeHtml(String(node.attrs?.text ?? node.attrs?.shortName ?? ""));
 		case "panel":
 			return convertPanel(node);
 		case "expand":
@@ -799,7 +779,8 @@ function convertNode(node: AdfNode): string {
 			return convertExpand(node);
 		case "status": {
 			const text = node.attrs?.text ?? "";
-			const color = node.attrs?.color ?? "neutral";
+			const rawColor = String(node.attrs?.color ?? "neutral").toLowerCase();
+			const color = STATUS_COLOUR_TO_DC[rawColor] ?? "Grey";
 			return (
 				`<ac:structured-macro ac:name="status">` +
 				`<ac:parameter ac:name="title">${escapeHtml(text)}</ac:parameter>` +
@@ -808,14 +789,14 @@ function convertNode(node: AdfNode): string {
 			);
 		}
 		case "taskList":
-			return `<ul class="task-list">${convertChildren(node)}</ul>`;
+			return `<ac:task-list>${convertChildren(node)}</ac:task-list>`;
 		case "taskItem": {
-			const checked = node.attrs?.state === "DONE" ? "checked " : "";
-			return `<li><ac:task><ac:task-status>${checked ? "complete" : "incomplete"}</ac:task-status><ac:task-body>${convertInlineContent(node.content)}</ac:task-body></ac:task></li>`;
+			const status = node.attrs?.state === "DONE" ? "complete" : "incomplete";
+			return `<ac:task><ac:task-status>${status}</ac:task-status><ac:task-body>${convertInlineContent(node.content)}</ac:task-body></ac:task>`;
 		}
 		case "mention": {
-			const accountId = node.attrs?.id ?? "";
-			return `<ac:link><ri:user ri:account-id="${escapeHtml(accountId)}" /></ac:link>`;
+			const userKey = String(node.attrs?.id ?? "");
+			return `<ac:link><ri:user ri:userkey="${escapeHtml(userKey)}" /></ac:link>`;
 		}
 		case "extension":
 		case "inlineExtension":

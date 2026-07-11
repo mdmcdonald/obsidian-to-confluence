@@ -3,26 +3,27 @@ import {
 	ConfluenceUploadSettings,
 	Publisher,
 	ConfluencePageConfig,
-	StaticSettingsLoader,
 	MermaidRendererPlugin,
 	UploadAdfFileResult,
 } from "@markdown-confluence/lib";
 import { MermaidElectronPNGRenderer, PNGQuality } from "./MermaidElectronPNGRenderer";
 import { ConfluenceSettingTab } from "./ConfluenceSettingTab";
-import ObsidianAdaptor, { TitleRename } from "./adaptors/obsidian";
+import ObsidianAdaptor from "./adaptors/obsidian";
 import { PublishRecord, detectOrphans, exceedsRemovalCap } from "./publishState";
 import { CompletedModal } from "./CompletedModal";
 import { ObsidianConfluenceClient } from "./MyBaseClient";
 import { StructuredPublisher } from "./StructuredPublisher";
+import { DataCenterSettingsLoader } from "./DataCenterSettingsLoader";
+import { isPathInFolder } from "./folderTree";
+import { DeletedNoteAction, FailedFile, OrphanSummary, UploadResults } from "./publishResults";
 import {
 	ConfluencePerPageForm,
 	ConfluencePerPageUIValues,
 	mapFrontmatterToConfluencePerPageUIValues,
 } from "./ConfluencePerPageForm";
 
-export interface ObsidianPluginSettings
-	extends ConfluenceUploadSettings.ConfluenceSettings {
-	mermaidQuality?: PNGQuality;  // 'low' | 'medium' | 'high', defaults to 'high'
+export interface ObsidianPluginSettings extends ConfluenceUploadSettings.ConfluenceSettings {
+	mermaidQuality?: PNGQuality; // 'low' | 'medium' | 'high', defaults to 'high'
 	usePersonalAccessToken: boolean;
 	accessToken: string;
 	atlassianPassword: string;
@@ -57,8 +58,6 @@ export interface ObsidianPluginSettings
 	lastPublishFailed?: number;
 }
 
-export type DeletedNoteAction = "off" | "report" | "archive" | "trash";
-
 function humanizeMillis(ms: number): string {
 	const s = Math.floor(ms / 1000);
 	if (s < 60) return `${s}s`;
@@ -70,29 +69,8 @@ function humanizeMillis(ms: number): string {
 	return `${d}d`;
 }
 
-interface FailedFile {
-	fileName: string;
-	reason: string;
-}
-
-interface OrphanSummary {
-	action: DeletedNoteAction;
-	ok: number;
-	failed: number;
-	ids: string[];
-	/** pageIds actually removed (archived/trashed). Used to prune state. */
-	removed: string[];
-}
-
-interface UploadResults {
-	errorMessage: string | null;
-	failedFiles: FailedFile[];
-	filesUploadResult: UploadAdfFileResult[];
-	renamedFiles: TitleRename[];
-	/** Count of notes skipped as unchanged (skip-unchanged). */
-	skipped?: number;
-	/** Result of handling pages whose source note was removed, if any. */
-	orphansHandled?: OrphanSummary | null;
+function dataCenterPageUrl(baseUrl: string, pageId: string): string {
+	return `${baseUrl.trim().replace(/\/+$/, "")}/pages/viewpage.action?pageId=${encodeURIComponent(pageId)}`;
 }
 
 export default class ConfluencePlugin extends Plugin {
@@ -117,29 +95,30 @@ export default class ConfluencePlugin extends Plugin {
 		const authentication = this.settings.usePersonalAccessToken
 			? { bearer: this.settings.accessToken }
 			: {
-				basic: {
-					username: this.settings.atlassianUserName,
-					password: this.settings.atlassianPassword,
-				},
-			};
+					basic: {
+						username: this.settings.atlassianUserName,
+						password: this.settings.atlassianPassword,
+					},
+				};
 
 		return new ObsidianConfluenceClient({
-			host: this.settings.confluenceBaseUrl,
-			// eslint-disable-next-line @typescript-eslint/no-explicit-any
+			host: this.settings.confluenceBaseUrl.trim().replace(/\/+$/, ""),
+
 			authentication: authentication as any,
 			debugLogging: this.settings.debugLogging,
 			middlewares: {
 				onError(e) {
 					console.error("Confluence API Error:", e);
 					if (
+						e &&
+						typeof e === "object" &&
 						"response" in e &&
 						e.response &&
+						typeof e.response === "object" &&
 						"data" in e.response
 					) {
-						e.message =
-							typeof e.response.data === "string"
-								? e.response.data
-								: JSON.stringify(e.response.data);
+						(e as { message?: string }).message =
+							typeof e.response.data === "string" ? e.response.data : JSON.stringify(e.response.data);
 					}
 				},
 				onResponse: (data: unknown) => {
@@ -154,12 +133,7 @@ export default class ConfluencePlugin extends Plugin {
 		await this.loadSettings();
 		const { vault, metadataCache, workspace } = this.app;
 		this.workspace = workspace;
-		this.adaptor = new ObsidianAdaptor(
-			vault,
-			metadataCache,
-			this.settings,
-			this.app,
-		);
+		this.adaptor = new ObsidianAdaptor(vault, metadataCache, this.settings, this.app);
 		this.adaptor.showMetadataPanel = this.settings.showMetadataPanel;
 		this.adaptor.mapTaxonomyToLabels = this.settings.mapTaxonomyToLabels;
 		this.adaptor.preserveFolderStructure = this.settings.preserveFolderStructure;
@@ -168,33 +142,23 @@ export default class ConfluencePlugin extends Plugin {
 		const mermaidRenderer = new MermaidElectronPNGRenderer(quality, this);
 		const mermaidPlugin = new MermaidRendererPlugin(mermaidRenderer);
 
-		console.log(`[Confluence] Initializing client for ${this.settings.confluenceBaseUrl} (user: ${this.settings.atlassianUserName || "(PAT)"})`);
+		console.log(
+			`[Confluence] Initializing client for ${this.settings.confluenceBaseUrl} (user: ${this.settings.atlassianUserName || "(PAT)"})`,
+		);
 
 		const confluenceClient = this.getConfluenceClient();
 
-		// The library's SettingsLoader.validateSettings rejects empty
-		// folderToPublish, but we allow it to mean "publish everything".
-		// Pass a placeholder to satisfy validation; the adaptor uses
-		// this.settings directly where startsWith("") matches all paths.
-		const loaderSettings = !this.settings.folderToPublish
-			? { ...this.settings, folderToPublish: "/" }
-			: this.settings;
-		const settingsLoader = new StaticSettingsLoader(loaderSettings);
+		// Empty folder means vault root. Keep the loader's normalization isolated
+		// from the persisted settings object.
+		const loaderSettings = {
+			...this.settings,
+			folderToPublish: this.settings.folderToPublish || "/",
+		};
+		const settingsLoader = new DataCenterSettingsLoader(loaderSettings);
 		this.publisher = this.settings.preserveFolderStructure
-			? new StructuredPublisher(
-					this.adaptor,
-					settingsLoader,
-					confluenceClient,
-					[mermaidPlugin],
-				)
-			: new Publisher(
-					this.adaptor,
-					settingsLoader,
-					confluenceClient,
-					[mermaidPlugin],
-				);
+			? new StructuredPublisher(this.adaptor, settingsLoader, confluenceClient, [mermaidPlugin])
+			: new Publisher(this.adaptor, settingsLoader, confluenceClient, [mermaidPlugin]);
 	}
-
 
 	/**
 	 * Publish a single batch of files. Restricts the adaptor's view to just
@@ -209,14 +173,18 @@ export default class ConfluencePlugin extends Plugin {
 		try {
 			const adrFiles = await this.publisher.publish();
 
-			// Library hardcodes Cloud /wiki/spaces/ in page URLs — rewrite for DC.
+			// Build a context-path-safe Data Center view URL from the resolved page ID
+			// rather than rewriting a Cloud-specific `/wiki/spaces/` path.
 			for (const result of adrFiles) {
-				if (result.successfulUploadResult) {
-					result.successfulUploadResult.adfFile.pageUrl =
-						result.successfulUploadResult.adfFile.pageUrl.replace("/wiki/spaces/", "/spaces/");
-				}
-				if (result.node?.file?.pageUrl) {
-					result.node.file.pageUrl = result.node.file.pageUrl.replace("/wiki/spaces/", "/spaces/");
+				const uploadedFile = result.successfulUploadResult?.adfFile as
+					| { pageId?: string; pageUrl?: string }
+					| undefined;
+				const nodeFile = result.node?.file as { pageId?: string; pageUrl?: string } | undefined;
+				const pageId = uploadedFile?.pageId ?? nodeFile?.pageId;
+				if (pageId) {
+					const pageUrl = dataCenterPageUrl(this.settings.confluenceBaseUrl, String(pageId));
+					if (uploadedFile) uploadedFile.pageUrl = pageUrl;
+					if (nodeFile) nodeFile.pageUrl = pageUrl;
 				}
 			}
 
@@ -230,7 +198,9 @@ export default class ConfluencePlugin extends Plugin {
 				const reason = element.reason ?? "No Reason Provided";
 				console.error(`[Confluence] FAILED ${element.node.file.absoluteFilePath}: ${reason}`);
 				if (reason.includes("last updated by another user")) {
-					console.error(`[Confluence] Page was last updated by a different account — check that your API credentials own these pages.`);
+					console.error(
+						`[Confluence] Page was last updated by a different account — check that your API credentials own these pages.`,
+					);
 				}
 				if (reason.includes("outside the page tree")) {
 					console.error(`[Confluence] A page with this title already exists in a different location in Confluence.`);
@@ -247,9 +217,7 @@ export default class ConfluencePlugin extends Plugin {
 		const fullPublish = !publishFilter;
 		console.log(`[Confluence] === Publish start (filter: ${publishFilter ?? "(all)"}${force ? ", force" : ""}) ===`);
 
-		const paths = publishFilter
-			? [publishFilter]
-			: await this.adaptor.getAllPublishableFilePaths();
+		const paths = publishFilter ? [publishFilter] : await this.adaptor.getAllPublishableFilePaths();
 
 		// Pre-flight: build the publish context against the whole vault (not just
 		// this batch). This computes the effective Confluence title for every
@@ -299,7 +267,9 @@ export default class ConfluencePlugin extends Plugin {
 			batches.push(publishPaths.slice(i, i + batchSize));
 		}
 
-		console.log(`[Confluence] ${publishPaths.length} to publish, ${skipped} unchanged, in ${batches.length} batch(es) of ${batchSize}`);
+		console.log(
+			`[Confluence] ${publishPaths.length} to publish, ${skipped} unchanged, in ${batches.length} batch(es) of ${batchSize}`,
+		);
 
 		// Note: we do NOT early-return when there is nothing to publish — on a
 		// full publish, reconciliation still runs so deletions are detected even
@@ -332,7 +302,7 @@ export default class ConfluencePlugin extends Plugin {
 				}
 			}
 			// Update the per-path publish record (for skip-unchanged) and, on a
-			// full publish, archive/trash pages whose source note is now gone.
+			// full publish, report/trash pages whose source note is now gone.
 			try {
 				aggregate.orphansHandled = await this.reconcilePublishState(
 					paths,
@@ -351,13 +321,12 @@ export default class ConfluencePlugin extends Plugin {
 				`Confluence publish done — ✓${aggregate.filesUploadResult.length} ✗${aggregate.failedFiles.length}${skipped ? ` ⏭${skipped}` : ""}${orphMsg}`,
 			);
 			setTimeout(() => notice.hide(), 3000);
-			await this.persistPublishState(
-				aggregate.filesUploadResult.length,
-				aggregate.failedFiles.length,
-			);
+			await this.persistPublishState(aggregate.filesUploadResult.length, aggregate.failedFiles.length);
 		}
 
-		console.log(`[Confluence] === Publish Complete: ${aggregate.filesUploadResult.length} ok, ${aggregate.failedFiles.length} failed, ${skipped} skipped ===`);
+		console.log(
+			`[Confluence] === Publish Complete: ${aggregate.filesUploadResult.length} ok, ${aggregate.failedFiles.length} failed, ${skipped} skipped ===`,
+		);
 		return aggregate;
 	}
 
@@ -376,7 +345,9 @@ export default class ConfluencePlugin extends Plugin {
 		aggregate: UploadResults,
 		fullPublish: boolean,
 	): Promise<OrphanSummary | null> {
-		const next: Record<string, PublishRecord> = { ...this.settings.publishedPages };
+		const next: Record<string, PublishRecord> = {
+			...this.settings.publishedPages,
+		};
 
 		// Authoritative pageId per successfully-published path (from the result).
 		const pageIdByPath = new Map<string, string>();
@@ -403,10 +374,12 @@ export default class ConfluencePlugin extends Plugin {
 			// Safety valve: if NOTHING is publishable but pages are tracked, this
 			// is almost certainly a misconfiguration (e.g. a wrong "Folder to
 			// publish") rather than a real mass-deletion. Skip orphan handling so
-			// we never archive/trash the entire space by accident.
+			// we never trash the entire space by accident.
 			const trackedCount = Object.keys(this.settings.publishedPages).length;
 			if (allPaths.length === 0 && trackedCount > 0) {
-				console.warn(`[Confluence] 0 publishable notes found but ${trackedCount} page(s) tracked — skipping deletion to avoid mass-removal from a likely misconfiguration. Check "Folder to publish"; use "Reset publish cache" if this is intentional.`);
+				console.warn(
+					`[Confluence] 0 publishable notes found but ${trackedCount} page(s) tracked — skipping deletion to avoid mass-removal from a likely misconfiguration. Check "Folder to publish"; use "Reset publish cache" if this is intentional.`,
+				);
 				new Notice("Confluence: 0 publishable notes — skipping deletion (likely misconfiguration).");
 				this.settings.publishedPages = next;
 				return null;
@@ -425,12 +398,23 @@ export default class ConfluencePlugin extends Plugin {
 			// removal and report instead — and keep the full record (no pruning)
 			// so it re-evaluates correctly once the misconfig is fixed.
 			const cap = this.settings.maxDeletePerPublish ?? 25;
-			const destructive = this.settings.onDeletedNote === "archive" || this.settings.onDeletedNote === "trash";
+			const destructive = this.settings.onDeletedNote === "trash";
 			if (destructive && exceedsRemovalCap(orphanPageIds.length, cap)) {
-				console.warn(`[Confluence] ${orphanPageIds.length} orphaned page(s) exceeds the safety limit (${cap}) — NOT removing them. Check "Folder to publish"; raise "Max pages to remove per publish" (or set 0) if this is intentional. Page IDs: ${orphanPageIds.join(", ")}`);
-				new Notice(`Confluence: ${orphanPageIds.length} pages would be removed — over the safety limit of ${cap}. Skipped; see console.`, 10000);
+				console.warn(
+					`[Confluence] ${orphanPageIds.length} orphaned page(s) exceeds the safety limit (${cap}) — NOT removing them. Check "Folder to publish"; raise "Max pages to remove per publish" (or set 0) if this is intentional. Page IDs: ${orphanPageIds.join(", ")}`,
+				);
+				new Notice(
+					`Confluence: ${orphanPageIds.length} pages would be removed — over the safety limit of ${cap}. Skipped; see console.`,
+					10000,
+				);
 				this.settings.publishedPages = next; // keep everything tracked
-				return { action: "report", ok: 0, failed: orphanPageIds.length, ids: orphanPageIds, removed: [] };
+				return {
+					action: "report",
+					ok: 0,
+					failed: orphanPageIds.length,
+					ids: orphanPageIds,
+					removed: [],
+				};
 			}
 
 			if (orphanPageIds.length > 0 && this.settings.onDeletedNote !== "off") {
@@ -441,7 +425,7 @@ export default class ConfluencePlugin extends Plugin {
 
 			// Prune state, but RETAIN any orphan whose page we did not actually
 			// remove, so it is not silently forgotten: a failed/unsupported
-			// archive is retried, and orphans seen in "report" mode persist until
+			// trash is retried, and orphans seen in "report" mode persist until
 			// really removed. Only "off" drops orphan records without tracking.
 			const removed = new Set(orphansHandled?.removed ?? []);
 			const finalState = { ...kept };
@@ -458,9 +442,9 @@ export default class ConfluencePlugin extends Plugin {
 		return orphansHandled;
 	}
 
-	/** Archive / trash / report Confluence pages whose source note is gone. */
+	/** Trash or report Confluence pages whose source note is gone. */
 	private async handleOrphans(pageIds: string[], mode: DeletedNoteAction): Promise<OrphanSummary> {
-		if (mode === "report") {
+		if (mode === "report" || mode === "off") {
 			console.log(`[Confluence] Orphaned page(s) (source note removed): ${pageIds.join(", ")}`);
 			new Notice(`Confluence: ${pageIds.length} orphaned page(s) — see console (deletion set to report-only)`);
 			return { action: "report", ok: 0, failed: 0, ids: pageIds, removed: [] };
@@ -468,7 +452,6 @@ export default class ConfluencePlugin extends Plugin {
 		const client = this.getConfluenceClient();
 		let ok = 0;
 		let failed = 0;
-		let archiveUnsupported = false;
 		const removed: string[] = [];
 		for (const id of pageIds) {
 			// Confluence page ids are positive integers; refuse anything else so a
@@ -479,31 +462,18 @@ export default class ConfluencePlugin extends Plugin {
 				continue;
 			}
 			try {
-				if (mode === "archive") {
-					await client.content.archivePages({ pages: [{ id: Number(id) }] });
-				} else {
-					await client.content.deleteContent({ id });
-				}
+				await client.content.deleteContent({ id });
 				ok++;
 				removed.push(id);
-				console.log(`[Confluence] ${mode === "archive" ? "Archived" : "Trashed"} orphaned page ${id}`);
+				console.log(`[Confluence] Trashed orphaned page ${id}`);
 			} catch (e) {
 				failed++;
-				// eslint-disable-next-line @typescript-eslint/no-explicit-any
+
 				const status = (e as any)?.response?.status;
-				// 405/404 on the bulk-archive endpoint means this Confluence Data
-				// Center version doesn't expose POST /rest/api/content/archive.
-				if (mode === "archive" && (status === 405 || status === 404)) {
-					archiveUnsupported = true;
-				}
-				console.error(`[Confluence] Failed to ${mode} orphaned page ${id} (status ${status ?? "?"}):`, e);
+				console.error(`[Confluence] Failed to trash orphaned page ${id} (status ${status ?? "?"}):`, e);
 			}
 		}
-		if (archiveUnsupported) {
-			console.warn(`[Confluence] The archive REST endpoint (POST /rest/api/content/archive) is not available on this Confluence Data Center version. Set "When a note is deleted" to "Move to trash" or "Report only".`);
-			new Notice(`Confluence: this server doesn't support the archive API — ${pageIds.length - ok} page(s) left in place. Switch "When a note is deleted" to Trash or Report.`, 12000);
-		}
-		return { action: mode, ok, failed, ids: pageIds, removed };
+		return { action: "trash", ok, failed, ids: pageIds, removed };
 	}
 
 	private setupStatusBar(): void {
@@ -531,9 +501,7 @@ export default class ConfluencePlugin extends Plugin {
 		const ago = humanizeMillis(Date.now() - last);
 		const failed = this.settings.lastPublishFailed ?? 0;
 		const succeeded = this.settings.lastPublishSucceeded ?? 0;
-		const summary = failed > 0
-			? `✗ ${failed} failed (${succeeded} ok)`
-			: `✓ ${succeeded} ok`;
+		const summary = failed > 0 ? `✗ ${failed} failed (${succeeded} ok)` : `✓ ${succeeded} ok`;
 		this.statusBarEl.setText(`Confluence: ${summary} · ${ago} ago`);
 	}
 
@@ -742,33 +710,22 @@ export default class ConfluencePlugin extends Plugin {
 				}
 
 				if (checking) {
-					const frontMatter = this.app.metadataCache.getCache(
-						view.file.path,
-					)?.frontmatter;
+					const frontMatter = this.app.metadataCache.getCache(view.file.path)?.frontmatter;
 					const file = view.file;
 					const enabledForPublishing =
-						(file.path.startsWith(this.settings.folderToPublish) &&
-							(!frontMatter ||
-								frontMatter["connie-publish"] !== false)) ||
+						(isPathInFolder(file.path, this.settings.folderToPublish) &&
+							(!frontMatter || frontMatter["connie-publish"] !== false)) ||
 						(frontMatter && frontMatter["connie-publish"] === true);
 					return !enabledForPublishing;
 				}
 
-				this.app.fileManager.processFrontMatter(
-					view.file,
-					(frontmatter) => {
-						if (
-							view.file &&
-							view.file.path.startsWith(
-								this.settings.folderToPublish,
-							)
-						) {
-							delete frontmatter["connie-publish"];
-						} else {
-							frontmatter["connie-publish"] = true;
-						}
-					},
-				);
+				this.app.fileManager.processFrontMatter(view.file, (frontmatter) => {
+					if (view.file && isPathInFolder(view.file.path, this.settings.folderToPublish)) {
+						delete frontmatter["connie-publish"];
+					} else {
+						frontmatter["connie-publish"] = true;
+					}
+				});
 				return true;
 			},
 		});
@@ -782,33 +739,22 @@ export default class ConfluencePlugin extends Plugin {
 				}
 
 				if (checking) {
-					const frontMatter = this.app.metadataCache.getCache(
-						view.file.path,
-					)?.frontmatter;
+					const frontMatter = this.app.metadataCache.getCache(view.file.path)?.frontmatter;
 					const file = view.file;
 					const enabledForPublishing =
-						(file.path.startsWith(this.settings.folderToPublish) &&
-							(!frontMatter ||
-								frontMatter["connie-publish"] !== false)) ||
+						(isPathInFolder(file.path, this.settings.folderToPublish) &&
+							(!frontMatter || frontMatter["connie-publish"] !== false)) ||
 						(frontMatter && frontMatter["connie-publish"] === true);
 					return enabledForPublishing;
 				}
 
-				this.app.fileManager.processFrontMatter(
-					view.file,
-					(frontmatter) => {
-						if (
-							view.file &&
-							view.file.path.startsWith(
-								this.settings.folderToPublish,
-							)
-						) {
-							frontmatter["connie-publish"] = false;
-						} else {
-							delete frontmatter["connie-publish"];
-						}
-					},
-				);
+				this.app.fileManager.processFrontMatter(view.file, (frontmatter) => {
+					if (view.file && isPathInFolder(view.file.path, this.settings.folderToPublish)) {
+						frontmatter["connie-publish"] = false;
+					} else {
+						delete frontmatter["connie-publish"];
+					}
+				});
 				return true;
 			},
 		});
@@ -821,41 +767,24 @@ export default class ConfluencePlugin extends Plugin {
 					return false;
 				}
 
-				const frontMatter = this.app.metadataCache.getCache(
-					view.file.path,
-				)?.frontmatter;
+				const frontMatter = this.app.metadataCache.getCache(view.file.path)?.frontmatter;
 
 				const file = view.file;
 
 				new ConfluencePerPageForm(this.app, {
 					config: ConfluencePageConfig.conniePerPageConfig,
-					initialValues:
-						mapFrontmatterToConfluencePerPageUIValues(frontMatter),
+					initialValues: mapFrontmatterToConfluencePerPageUIValues(frontMatter),
 					onSubmit: (values, close) => {
-						const valuesToSet: Partial<ConfluencePageConfig.ConfluencePerPageAllValues> =
-							{};
+						const valuesToSet: Partial<ConfluencePageConfig.ConfluencePerPageAllValues> = {};
 						for (const propertyKey in values) {
-							if (
-								Object.prototype.hasOwnProperty.call(
-									values,
-									propertyKey,
-								)
-							) {
-								const element =
-									values[
-										propertyKey as keyof ConfluencePerPageUIValues
-									];
+							if (Object.prototype.hasOwnProperty.call(values, propertyKey)) {
+								const element = values[propertyKey as keyof ConfluencePerPageUIValues];
 								if (element.isSet) {
-									valuesToSet[
-										propertyKey as keyof ConfluencePerPageUIValues
-									] = element.value as never;
+									valuesToSet[propertyKey as keyof ConfluencePerPageUIValues] = element.value as never;
 								}
 							}
 						}
-						this.adaptor.updateMarkdownValues(
-							file.path,
-							valuesToSet,
-						);
+						this.adaptor.updateMarkdownValues(file.path, valuesToSet);
 						close();
 					},
 				}).open();
@@ -865,8 +794,6 @@ export default class ConfluencePlugin extends Plugin {
 
 		this.addSettingTab(new ConfluenceSettingTab(this.app, this));
 	}
-
-	override async onunload() {}
 
 	async loadSettings() {
 		this.settings = Object.assign(
@@ -892,6 +819,12 @@ export default class ConfluencePlugin extends Plugin {
 			await this.loadData(),
 		);
 		if (!this.settings.publishedPages) this.settings.publishedPages = {};
+		// Page archive is a Confluence Cloud API, not a documented Data Center
+		// content operation. Safely migrate the old setting to report-only.
+		if ((this.settings.onDeletedNote as string) === "archive") {
+			console.warn('[Confluence] Migrating unsupported deleted-note action "archive" to "report".');
+			this.settings.onDeletedNote = "report";
+		}
 	}
 
 	async saveSettings() {
@@ -905,9 +838,7 @@ function extractErrorMessage(error: unknown): string {
 		// Include the response data if it's an HTTPError
 		if ("response" in error && typeof (error as any).response === "object") {
 			const resp = (error as any).response;
-			const data = typeof resp.data === "string"
-				? resp.data
-				: JSON.stringify(resp.data);
+			const data = typeof resp.data === "string" ? resp.data : JSON.stringify(resp.data);
 			return `${error.message}\n\nAPI Response (status ${resp.status ?? "unknown"}):\n${data?.substring(0, 500) ?? "(empty)"}`;
 		}
 		return error.message;
@@ -922,7 +853,6 @@ function extractErrorMessage(error: unknown): string {
 	}
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 function polyfillRecursive(obj: any) {
 	if (obj && typeof obj === "object") {
 		if ("username" in obj && !("accountId" in obj)) {

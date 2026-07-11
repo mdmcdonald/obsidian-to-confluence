@@ -1,6 +1,6 @@
 import { ChartData, MermaidRenderer } from "@markdown-confluence/lib";
 import { loadMermaid, Plugin } from "obsidian";
-import { Mermaid } from "mermaid";
+import type { Mermaid } from "mermaid";
 import SparkMD5 from "spark-md5";
 import { replaceForeignObjects, stripBackgroundStyles } from "./mermaidSvg";
 
@@ -11,12 +11,10 @@ export type PNGQuality = "low" | "medium" | "high";
  * the publish flow can continue rather than aborting the whole page.
  */
 const FALLBACK_PNG = Buffer.from([
-	0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d,
-	0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
-	0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4, 0x89, 0x00, 0x00, 0x00,
-	0x0d, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x62, 0x00, 0x00, 0x00, 0x00,
-	0x00, 0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x8d, 0xb4, 0x19, 0x3a, 0x00,
-	0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+	0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00,
+	0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4, 0x89, 0x00, 0x00, 0x00, 0x0d, 0x49,
+	0x44, 0x41, 0x54, 0x78, 0x9c, 0x62, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x8d, 0xb4,
+	0x19, 0x3a, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
 ]);
 
 export class MermaidElectronPNGRenderer implements MermaidRenderer {
@@ -190,14 +188,19 @@ export class MermaidElectronPNGRenderer implements MermaidRenderer {
 									canvas.width = scaledWidth;
 									canvas.height = scaledHeight;
 									const ctx = canvas.getContext("2d");
-									if (!ctx) { reject(new Error("No 2d context")); return; }
+									if (!ctx) {
+										reject(new Error("No 2d context"));
+										return;
+									}
 									ctx.fillStyle = "#ffffff";
 									ctx.fillRect(0, 0, scaledWidth, scaledHeight);
 									ctx.drawImage(img, 0, 0, scaledWidth, scaledHeight);
 									const pngDataUrl = canvas.toDataURL("image/png");
 									const base64 = pngDataUrl.split(",")[1];
 									resolve(Buffer.from(base64, "base64"));
-								} catch (err) { reject(err); }
+								} catch (err) {
+									reject(err);
+								}
 							};
 							img.onerror = (e) => {
 								clearTimeout(timeout);
@@ -211,7 +214,9 @@ export class MermaidElectronPNGRenderer implements MermaidRenderer {
 
 					capturedCharts.set(chartName, pngBuffer);
 					await this.writeCache(key, pngBuffer);
-					console.log(`[MermaidPNG] OK ${chartName} (${pngBuffer.length} bytes, ${scaledWidth}x${scaledHeight}, cached)`);
+					console.log(
+						`[MermaidPNG] OK ${chartName} (${pngBuffer.length} bytes, ${scaledWidth}x${scaledHeight}, cached)`,
+					);
 				} finally {
 					if (container.parentNode) {
 						document.body.removeChild(container);

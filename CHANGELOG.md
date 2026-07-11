@@ -1,17 +1,26 @@
 # Changelog
 
+## Unreleased
+
+### Data Center 9.2 audit and hardening
+
+* Declare Confluence Data Center 9.2 LTS as the compatibility baseline.
+* Validate PAT and Basic authentication with a Data Center-specific settings loader.
+* Convert both page creation and update payloads to storage format and fail closed when
+  local conversion fails.
+* Use documented Data Center trash behavior; remove the unsupported page-archive path.
+* Correct storage output for task lists, mentions, status colours, ordered-list starts,
+  and CDATA terminators.
+* Preserve context paths, use segment-aware publishing scope, and retain relative link
+  paths during resolution.
+* Add regression tests and test-source type checking, restore ESLint 9 and Prettier
+  quality gates, and remove duplicate result models and build-only runtime dependencies.
+
 ## [5.8.0] (2026-01-22)
 
 ### Features
 
 * Add support for Confluence Data Center (PAT & Basic Auth)
-
-### Dependencies
-
-* The following workspace dependencies were updated
-  * dependencies
-    * @markdown-confluence/lib bumped from 3.0.4 to 3.0.0
-    * @markdown-confluence/mermaid-electron-renderer bumped from 3.0.4 to 3.0.0
 
 ## [5.5.2](https://github.com/markdown-confluence/markdown-confluence/compare/obsidian-confluence-v5.5.1...obsidian-confluence-v5.5.2) (2023-09-24)
 

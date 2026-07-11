@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import {
 	commonPathOf,
+	isPathInFolder,
 	relativeTo,
 	splitPath,
 	deriveStructure,
@@ -27,6 +28,14 @@ test("relativeTo strips a base prefix", () => {
 	assert.equal(relativeTo("", "a/b.md"), "a/b.md");
 	assert.equal(relativeTo("a/b", "a/b/f.md"), "f.md");
 	assert.deepEqual(splitPath("/a//b/"), ["a", "b"]);
+});
+
+test("publishing-folder checks are segment-aware and support vault root", () => {
+	assert.equal(isPathInFolder("Docs/page.md", "Docs"), true);
+	assert.equal(isPathInFolder("Docs/sub/page.md", "Docs/"), true);
+	assert.equal(isPathInFolder("Docs-old/page.md", "Docs"), false);
+	assert.equal(isPathInFolder("anything/page.md", ""), true);
+	assert.equal(isPathInFolder("anything/page.md", "/"), true);
 });
 
 // ---------------------------------------------------------------------------

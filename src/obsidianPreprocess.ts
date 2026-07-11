@@ -42,9 +42,7 @@ export function preprocessTableCells(md: string): string {
 	return transformText(md, (text) =>
 		text
 			.split("\n")
-			.map((line) =>
-				/\|.*\|/.test(line) ? line.replace(/(\|[\t ]*)>/g, "$1\\>") : line,
-			)
+			.map((line) => (/\|.*\|/.test(line) ? line.replace(/(\|[\t ]*)>/g, "$1\\>") : line))
 			.join("\n"),
 	);
 }
@@ -97,12 +95,7 @@ function fromBase64(b: string): string {
 }
 
 export function encodeWikilink(payload: WikilinkPayload): string {
-	return (
-		"`" +
-		WIKILINK_SENTINEL_PREFIX +
-		toBase64(JSON.stringify(payload)) +
-		"`"
-	);
+	return "`" + WIKILINK_SENTINEL_PREFIX + toBase64(JSON.stringify(payload)) + "`";
 }
 
 export function decodeWikilink(sentinelText: string): WikilinkPayload | null {
@@ -166,8 +159,7 @@ function parseWikilink(inner: string): ParsedWikilink {
 
 	// Heading / block fragment: everything after the first "#".
 	const hashIdx = targetPart.indexOf("#");
-	const pageName =
-		hashIdx >= 0 ? targetPart.slice(0, hashIdx).trim() : targetPart.trim();
+	const pageName = hashIdx >= 0 ? targetPart.slice(0, hashIdx).trim() : targetPart.trim();
 	const fragment = hashIdx >= 0 ? targetPart.slice(hashIdx + 1).trim() : "";
 
 	let anchor: string | undefined;
@@ -198,10 +190,7 @@ export interface WikilinkPreprocessOptions {
 	onWarning?: (message: string) => void;
 }
 
-export function preprocessWikilinks(
-	md: string,
-	options: WikilinkPreprocessOptions,
-): string {
+export function preprocessWikilinks(md: string, options: WikilinkPreprocessOptions): string {
 	const { resolve, onWarning } = options;
 	return transformText(md, (text) =>
 		text.replace(WIKILINK_RE, (whole, inner: string) => {
@@ -220,7 +209,11 @@ export function preprocessWikilinks(
 					onWarning?.(`Block reference has no Confluence equivalent: [[${trimmedInner}]] — left as text`);
 					return display;
 				}
-				return encodeWikilink({ kind: "anchor", anchor: parsed.anchor, display });
+				return encodeWikilink({
+					kind: "anchor",
+					anchor: parsed.anchor,
+					display,
+				});
 			}
 
 			const res = resolve(parsed.pageName);
@@ -254,10 +247,7 @@ export function preprocessWikilinks(
 // Link text allows one level of nested brackets ([Type [Enum]](x.md)).
 const MD_FILE_LINK_RE = /(?<!!)\[((?:[^\][\n]|\[[^\]\n]*\])+)\]\(([^)\s]+?)(#[^)\s]*)?\)/g;
 
-export function preprocessMarkdownLinks(
-	md: string,
-	options: WikilinkPreprocessOptions,
-): string {
+export function preprocessMarkdownLinks(md: string, options: WikilinkPreprocessOptions): string {
 	const { resolve, onWarning } = options;
 	return transformText(md, (text) =>
 		text.replace(MD_FILE_LINK_RE, (whole, label: string, url: string, frag: string | undefined) => {
@@ -271,15 +261,25 @@ export function preprocessMarkdownLinks(
 				decoded = url;
 			}
 			if (!/\.md$/i.test(decoded)) return whole; // only vault .md files
-			const pageName = decoded.replace(/\.md$/i, "").split("/").pop()?.trim();
-			if (!pageName) return whole;
-			const res = resolve(pageName);
+			// Preserve the path rather than collapsing it to a basename. Obsidian's
+			// resolver uses the source note to interpret ../ and disambiguate duplicate
+			// filenames; dropping that path could silently link to the wrong page.
+			const linkPath = decoded.replace(/\.md$/i, "").trim();
+			if (!linkPath) return whole;
+			const res = resolve(linkPath);
 			if (!res.inVault || !res.publishable || res.title === undefined) {
 				onWarning?.(`Markdown link target not published: ${url} — left as text`);
 				return label; // fall back to the link text
 			}
-			const anchor = frag ? frag.slice(1).replace(/^\^/, "") : undefined;
-			return encodeWikilink({ kind: "page", title: res.title, anchor, display: label });
+			const rawAnchor = frag?.slice(1);
+			// Confluence has heading anchors but no equivalent for Obsidian block refs.
+			const anchor = rawAnchor && !rawAnchor.startsWith("^") ? rawAnchor : undefined;
+			return encodeWikilink({
+				kind: "page",
+				title: res.title,
+				anchor,
+				display: label,
+			});
 		}),
 	);
 }

@@ -1,0 +1,10 @@
+{
+	"extends": "./tsconfig.json",
+	"compilerOptions": {
+		"lib": ["ES2021", "DOM"],
+		"rootDir": ".",
+		"types": ["node"]
+	},
+	"include": ["src/**/*.ts", "src/**/*.tsx", "tests/**/*.ts"],
+	"exclude": ["node_modules", "dist", "dist-tests"]
+}

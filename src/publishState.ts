@@ -14,7 +14,7 @@ export interface PublishRecord {
 export interface OrphanResult {
 	/** Records to keep (every currently-publishable path). */
 	kept: Record<string, PublishRecord>;
-	/** Distinct pageIds whose source note is gone and should be archived/trashed. */
+	/** Distinct pageIds whose source note is gone and may be reported or trashed. */
 	orphanPageIds: string[];
 }
 
@@ -26,10 +26,7 @@ export interface OrphanResult {
  * Orphan detection is therefore keyed on pageId, not path, and never returns a
  * pageId that is still live.
  */
-export function detectOrphans(
-	records: Record<string, PublishRecord>,
-	currentPaths: ReadonlySet<string>,
-): OrphanResult {
+export function detectOrphans(records: Record<string, PublishRecord>, currentPaths: ReadonlySet<string>): OrphanResult {
 	const currentPageIds = new Set<string>();
 	for (const p of currentPaths) {
 		const rec = records[p];

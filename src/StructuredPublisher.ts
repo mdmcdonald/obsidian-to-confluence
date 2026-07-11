@@ -14,18 +14,12 @@ import { ensureAllFilesExistInConfluence } from "@markdown-confluence/lib/dist/T
 import type ObsidianAdaptor from "./adaptors/obsidian";
 import { planReparents } from "./reparent";
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Any = any;
 
 export class StructuredPublisher extends Publisher {
 	private structuredAdaptor: ObsidianAdaptor;
 
-	constructor(
-		adaptor: ObsidianAdaptor,
-		settingsLoader: Any,
-		confluenceClient: Any,
-		adfProcessingPlugins: Any,
-	) {
+	constructor(adaptor: ObsidianAdaptor, settingsLoader: Any, confluenceClient: Any, adfProcessingPlugins: Any) {
 		super(adaptor, settingsLoader, confluenceClient, adfProcessingPlugins);
 		this.structuredAdaptor = adaptor;
 	}
@@ -68,9 +62,7 @@ export class StructuredPublisher extends Publisher {
 
 		let confluencePagesToPublish = allPages;
 		if (publishFilter) {
-			confluencePagesToPublish = allPages.filter(
-				(file: Any) => file.file.absoluteFilePath === publishFilter,
-			);
+			confluencePagesToPublish = allPages.filter((file: Any) => file.file.absoluteFilePath === publishFilter);
 		}
 
 		const adrFileTasks = confluencePagesToPublish.map((file: Any) => self.publishFile(file));
@@ -110,10 +102,7 @@ export class StructuredPublisher extends Publisher {
 				});
 			} catch (e) {
 				failed++;
-				console.warn(
-					`[Confluence] move endpoint rejected for "${m.title}" (${m.pageId}) → ${m.targetId}:`,
-					e,
-				);
+				console.warn(`[Confluence] move endpoint rejected for "${m.title}" (${m.pageId}) → ${m.targetId}:`, e);
 				continue;
 			}
 			// Confirm the move actually took effect (DC may accept it but not apply it).
@@ -129,7 +118,8 @@ export class StructuredPublisher extends Publisher {
 		}
 		let msg = `[Confluence] Folder hierarchy: ${applied}/${moves.length} page(s) re-parented (move endpoint)`;
 		if (failed) msg += `; ${failed} call(s) FAILED — move endpoint may be unavailable on this Confluence`;
-		if (ignored) msg += `; ${ignored} accepted but NOT APPLIED — this Confluence is ignoring the move endpoint too (REST re-parenting unsupported here)`;
+		if (ignored)
+			msg += `; ${ignored} accepted but NOT APPLIED — this Confluence is ignoring the move endpoint too (REST re-parenting unsupported here)`;
 		console.log(msg);
 	}
 }

@@ -19,20 +19,74 @@ export interface Segment {
 
 function tokenizeInlineCode(text: string): Segment[] {
 	const segments: Segment[] = [];
-	const re = /`([^`\n]+)`/g;
-	let lastIndex = 0;
-	let m: RegExpExecArray | null;
-	while ((m = re.exec(text)) !== null) {
-		if (m.index > lastIndex) {
-			segments.push({ kind: "text", text: text.slice(lastIndex, m.index) });
+	let emittedThrough = 0;
+	let i = 0;
+
+	const isEscaped = (at: number): boolean => {
+		let slashes = 0;
+		for (let p = at - 1; p >= 0 && text[p] === "\\"; p--) slashes++;
+		return slashes % 2 === 1;
+	};
+
+	while (i < text.length) {
+		if (text[i] !== "`" || isEscaped(i)) {
+			i++;
+			continue;
 		}
-		segments.push({ kind: "protected", text: m[0] });
-		lastIndex = m.index + m[0].length;
+		let openerEnd = i;
+		while (text[openerEnd] === "`") openerEnd++;
+		const delimiterLength = openerEnd - i;
+
+		let close = openerEnd;
+		while (close < text.length) {
+			close = text.indexOf("`", close);
+			if (close < 0) break;
+			let closeEnd = close;
+			while (text[closeEnd] === "`") closeEnd++;
+			if (!isEscaped(close) && closeEnd - close === delimiterLength) break;
+			close = closeEnd;
+		}
+		if (close < 0) {
+			i = openerEnd;
+			continue;
+		}
+
+		if (i > emittedThrough) {
+			segments.push({ kind: "text", text: text.slice(emittedThrough, i) });
+		}
+		const protectedEnd = close + delimiterLength;
+		segments.push({ kind: "protected", text: text.slice(i, protectedEnd) });
+		emittedThrough = protectedEnd;
+		i = protectedEnd;
 	}
-	if (lastIndex < text.length) {
-		segments.push({ kind: "text", text: text.slice(lastIndex) });
+
+	if (emittedThrough < text.length) {
+		segments.push({ kind: "text", text: text.slice(emittedThrough) });
 	}
 	return segments;
+}
+
+interface Fence {
+	marker: "`" | "~";
+	length: number;
+}
+
+function openingFence(line: string): Fence | null {
+	const match = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
+	if (!match) return null;
+	const run = match[1];
+	// A backtick fence's info string cannot itself contain a backtick.
+	if (run[0] === "`" && match[2].includes("`")) return null;
+	return { marker: run[0] as Fence["marker"], length: run.length };
+}
+
+function closesFence(line: string, fence: Fence): boolean {
+	const match = /^ {0,3}(`+|~+)[\t ]*$/.exec(line);
+	return !!match && match[1][0] === fence.marker && match[1].length >= fence.length;
+}
+
+function isIndentedCodeLine(line: string): boolean {
+	return /^(?: {4}|\t)/.test(line);
 }
 
 /**
@@ -44,7 +98,8 @@ export function segmentMarkdown(md: string): Segment[] {
 	// Lookbehind split keeps the trailing "\n" on each line so concatenation
 	// reproduces the input exactly.
 	const lines = md.split(/(?<=\n)/);
-	let inFence: "```" | "~~~" | null = null;
+	let inFence: Fence | null = null;
+	let inIndentedCode = false;
 	let buffer: string[] = [];
 
 	const flushText = () => {
@@ -62,23 +117,37 @@ export function segmentMarkdown(md: string): Segment[] {
 		const stripped = line.replace(/\n$/, "");
 		if (inFence) {
 			buffer.push(line);
-			const closeRe = new RegExp(`^[\\t ]*${inFence}[\\t ]*$`);
-			if (closeRe.test(stripped)) {
+			if (closesFence(stripped, inFence)) {
 				flushProtected();
 				inFence = null;
 			}
 		} else {
-			const m = /^[\t ]*(```|~~~)/.exec(stripped);
-			if (m) {
+			const fence = openingFence(stripped);
+			if (fence) {
+				if (inIndentedCode) {
+					flushProtected();
+					inIndentedCode = false;
+				}
 				flushText();
 				buffer.push(line);
-				inFence = m[1] as "```" | "~~~";
+				inFence = fence;
+			} else if (isIndentedCodeLine(stripped)) {
+				if (!inIndentedCode) flushText();
+				inIndentedCode = true;
+				buffer.push(line);
+			} else if (inIndentedCode && stripped.trim() === "") {
+				// Blank lines within an indented code block remain protected.
+				buffer.push(line);
 			} else {
+				if (inIndentedCode) {
+					flushProtected();
+					inIndentedCode = false;
+				}
 				buffer.push(line);
 			}
 		}
 	}
-	if (inFence) flushProtected();
+	if (inFence || inIndentedCode) flushProtected();
 	else flushText();
 	return segments;
 }

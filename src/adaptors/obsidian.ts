@@ -12,11 +12,7 @@ import { folderFile } from "@markdown-confluence/lib/dist/FolderFile.js";
 import { lookup } from "mime-types";
 import SparkMD5 from "spark-md5";
 import { preprocessLatex } from "../LatexPreprocessor";
-import {
-	deriveTaxonomyLabels,
-	mergeTags,
-	type TaxonomyLabelField,
-} from "../taxonomyLabels";
+import { deriveTaxonomyLabels, mergeTags, type TaxonomyLabelField } from "../taxonomyLabels";
 import {
 	deriveStructure,
 	computeFolderTitles,
@@ -24,6 +20,7 @@ import {
 	assertUniqueTitles,
 	splitPath,
 	relativeTo,
+	isPathInFolder,
 	type DerivedStructure,
 	type FolderTreeNode,
 } from "../folderTree";
@@ -63,10 +60,21 @@ const META_REL_FIELDS: [string, string][] = [
  */
 const TAXONOMY_LABEL_FIELDS: readonly TaxonomyLabelField[] = ["subject", "type"];
 
+// Increment when conversion semantics change. Without this salt, notes whose
+// Markdown is unchanged would keep an old publish hash and never receive storage
+// format fixes until the user manually forced a full republish.
+const PUBLISH_HASH_SCHEMA_VERSION = "dc-storage-v2";
+
 function fmList(v: unknown): string[] {
 	if (v == null) return [];
 	const arr = Array.isArray(v) ? v : [v];
-	return arr.map((x) => String(x).replace(/^["']|["']$/g, "").trim()).filter((s) => s.length > 0);
+	return arr
+		.map((x) =>
+			String(x)
+				.replace(/^["']|["']$/g, "")
+				.trim(),
+		)
+		.filter((s) => s.length > 0);
 }
 
 /** Make a graph ID / taxonomy term human-readable (strip namespace, de-slug). */
@@ -107,9 +115,7 @@ const FENCE_OPEN_RE = /^[\t ]*(```|~~~)/;
  * heading from inside a code fence), so a `# ...` line inside ``` is ignored.
  * Returns the matching line index and captured groups, or null.
  */
-function findFirstHeadingLine(
-	lines: string[],
-): { index: number; indent: string; text: string } | null {
+function findFirstHeadingLine(lines: string[]): { index: number; indent: string; text: string } | null {
 	let inFence: string | null = null;
 	for (let i = 0; i < lines.length; i++) {
 		const line = lines[i];
@@ -209,7 +215,7 @@ export default class ObsidianAdaptor implements LoaderAdaptor {
 		if (!fileFM) return false;
 		const frontMatter = fileFM.frontmatter;
 		return (
-			(file.path.startsWith(this.settings.folderToPublish) &&
+			(isPathInFolder(file.path, this.settings.folderToPublish) &&
 				(!frontMatter || frontMatter["connie-publish"] !== false)) ||
 			(!!frontMatter && frontMatter["connie-publish"] === true)
 		);
@@ -301,7 +307,9 @@ export default class ObsidianAdaptor implements LoaderAdaptor {
 			this.publishTitleByPath.set(path, finalTitle);
 			const id = this.metadataCache.getCache(path)?.frontmatter?.id;
 			if (id != null) {
-				const key = String(id).replace(/^["']|["']$/g, "").trim();
+				const key = String(id)
+					.replace(/^["']|["']$/g, "")
+					.trim();
 				if (key) this.idToTitle.set(key, finalTitle);
 			}
 		}
@@ -317,10 +325,7 @@ export default class ObsidianAdaptor implements LoaderAdaptor {
 		this.landingToFolderTitle.clear();
 		if (this.preserveFolderStructure && paths.length > 0) {
 			const structure = deriveStructure(paths);
-			this.folderTitleByPath = computeFolderTitles(
-				structure.folders,
-				this.publishTitleByPath.values(),
-			);
+			this.folderTitleByPath = computeFolderTitles(structure.folders, this.publishTitleByPath.values());
 			this.structure = structure;
 
 			// A folder's README/index/eponymous file IS the folder page, so its
@@ -333,11 +338,15 @@ export default class ObsidianAdaptor implements LoaderAdaptor {
 				this.landingToFolderTitle.set(landingPath, folderTitle);
 				const id = this.metadataCache.getCache(landingPath)?.frontmatter?.id;
 				if (id != null) {
-					const key = String(id).replace(/^["']|["']$/g, "").trim();
+					const key = String(id)
+						.replace(/^["']|["']$/g, "")
+						.trim();
 					if (key) this.idToTitle.set(key, folderTitle);
 				}
 			}
-			console.log(`[Confluence] Preserving folder structure: ${structure.folders.length} folder(s), root "${structure.commonPath || "(vault)"}"`);
+			console.log(
+				`[Confluence] Preserving folder structure: ${structure.folders.length} folder(s), root "${structure.commonPath || "(vault)"}"`,
+			);
 		}
 	}
 
@@ -434,12 +443,18 @@ export default class ObsidianAdaptor implements LoaderAdaptor {
 		// 1) by filename (wikilink-style)
 		const res = this.resolveWikilink(bare, sourcePath);
 		if (res.publishable && res.title !== undefined) {
-			return { text: display ?? bare, link: { title: res.title, anchor, display: display ?? bare } };
+			return {
+				text: display ?? bare,
+				link: { title: res.title, anchor, display: display ?? bare },
+			};
 		}
 		// 2) by ontology graph id
 		const byId = this.idToTitle.get(bare);
 		if (byId !== undefined) {
-			return { text: display ?? byId, link: { title: byId, anchor, display: display ?? byId } };
+			return {
+				text: display ?? byId,
+				link: { title: byId, anchor, display: display ?? byId },
+			};
 		}
 		// 3) plain, humanised
 		return { text: display ?? humaniseRef(value) };
@@ -450,10 +465,7 @@ export default class ObsidianAdaptor implements LoaderAdaptor {
 	 * there is nothing worth showing. Relationship/ontology fields are resolved
 	 * to page links; `subject` taxonomy terms and scalars are humanised text.
 	 */
-	private buildMetadataBlock(
-		frontmatter: Record<string, unknown> | undefined,
-		sourcePath: string,
-	): string | null {
+	private buildMetadataBlock(frontmatter: Record<string, unknown> | undefined, sourcePath: string): string | null {
 		if (!frontmatter) return null;
 		const fields: MetaField[] = [];
 		const push = (label: string, values: MetaValue[]) => {
@@ -463,14 +475,22 @@ export default class ObsidianAdaptor implements LoaderAdaptor {
 		const typeVal = frontmatter.type ?? frontmatter.document_type;
 		if (typeVal != null) push("Type", [{ text: humaniseRef(String(typeVal)) }]);
 		for (const [key, label] of META_SCALAR_FIELDS) {
-			const vals = fmList(frontmatter[key]).map((v) => ({ text: humaniseRef(v) }));
+			const vals = fmList(frontmatter[key]).map((v) => ({
+				text: humaniseRef(v),
+			}));
 			push(label, vals);
 		}
 		// subject = taxonomy terms (not pages) — humanise.
-		push("Subject", fmList(frontmatter.subject).map((v) => ({ text: humaniseRef(v) })));
+		push(
+			"Subject",
+			fmList(frontmatter.subject).map((v) => ({ text: humaniseRef(v) })),
+		);
 		// relationships → links where resolvable.
 		for (const [key, label] of META_REL_FIELDS) {
-			push(label, fmList(frontmatter[key]).map((v) => this.resolveMetaRef(v, sourcePath)));
+			push(
+				label,
+				fmList(frontmatter[key]).map((v) => this.resolveMetaRef(v, sourcePath)),
+			);
 		}
 		return fields.length ? encodeMetadataBlock(fields) : null;
 	}
@@ -494,12 +514,17 @@ export default class ObsidianAdaptor implements LoaderAdaptor {
 		// republish to re-sync labels. Sorted for stability; only appended when there
 		// are tags, so tagless notes keep their existing hash (no mass re-publish).
 		const tags = Array.isArray(md.frontmatter?.tags)
-			? (md.frontmatter.tags as unknown[])
-					.filter((t): t is string => typeof t === "string")
-					.sort()
+			? (md.frontmatter.tags as unknown[]).filter((t): t is string => typeof t === "string").sort()
 			: [];
-		const base = `${md.pageTitle} ${folderTitle} ${md.contents}`;
-		return SparkMD5.hash(tags.length ? `${base} tags=${tags.join(",")}` : base);
+		return SparkMD5.hash(
+			JSON.stringify({
+				schema: PUBLISH_HASH_SCHEMA_VERSION,
+				pageTitle: md.pageTitle,
+				folderTitle,
+				contents: md.contents,
+				tags,
+			}),
+		);
 	}
 
 	async getMarkdownFilesToUpload(): Promise<FilesToUpload> {
@@ -600,25 +625,14 @@ export default class ObsidianAdaptor implements LoaderAdaptor {
 		};
 	}
 
-	async readBinary(
-		path: string,
-		referencedFromFilePath: string,
-	): Promise<BinaryFile | false> {
-		const testing = this.metadataCache.getFirstLinkpathDest(
-			path,
-			referencedFromFilePath,
-		);
+	async readBinary(path: string, referencedFromFilePath: string): Promise<BinaryFile | false> {
+		const testing = this.metadataCache.getFirstLinkpathDest(path, referencedFromFilePath);
 		if (testing) {
-			if (
-				!SUPPORTED_IMAGE_EXTENSIONS.includes(
-					testing.extension.toLowerCase(),
-				)
-			) {
+			if (!SUPPORTED_IMAGE_EXTENSIONS.includes(testing.extension.toLowerCase())) {
 				return false;
 			}
 			const files = await this.vault.readBinary(testing);
-			const mimeType =
-				lookup(testing.extension) || "application/octet-stream";
+			const mimeType = lookup(testing.extension) || "application/octet-stream";
 			return {
 				contents: files,
 				filePath: testing.path,
@@ -636,20 +650,14 @@ export default class ObsidianAdaptor implements LoaderAdaptor {
 		const config = ConfluencePageConfig.conniePerPageConfig;
 		const file = this.app.vault.getAbstractFileByPath(absoluteFilePath);
 		if (file instanceof TFile) {
-			this.app.fileManager.processFrontMatter(file, (fm) => {
+			await this.app.fileManager.processFrontMatter(file, (fm) => {
 				for (const propertyKey in config) {
 					if (!config.hasOwnProperty(propertyKey)) {
 						continue;
 					}
 
-					const { key } =
-						config[
-							propertyKey as keyof ConfluencePageConfig.ConfluencePerPageConfig
-						];
-					const value =
-						values[
-							propertyKey as keyof ConfluencePageConfig.ConfluencePerPageAllValues
-						];
+					const { key } = config[propertyKey as keyof ConfluencePageConfig.ConfluencePerPageConfig];
+					const value = values[propertyKey as keyof ConfluencePageConfig.ConfluencePerPageAllValues];
 					if (propertyKey in values) {
 						fm[key] = value;
 					}

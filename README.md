@@ -1,139 +1,146 @@
-# Obsidian Confluence Integration Plugin
+# Obsidian to Confluence Data Center
 
-This plugin allows you to publish markdown content from Obsidian to [Atlassian Confluence](https://www.atlassian.com/software/confluence). It supports Obsidian markdown extensions and works with Atlassian Cloud instances.
+Publish an Obsidian Markdown collection as navigable Confluence Data Center pages. The
+current compatibility baseline is **Confluence Data Center 9.2 LTS**; Atlassian Cloud is
+not a supported target.
+
+The plugin preserves a note hierarchy, resolves internal links, uploads images and
+Mermaid diagrams, and renders richer Confluence content such as panels, status macros,
+task lists, code blocks, Page Properties, and labels.
+
+> [!WARNING]
+> This repository still depends on the abandoned, Cloud-first
+> `@markdown-confluence/lib`. The Data Center adapter corrects several incompatibilities,
+> but ownership validation, attachment reconciliation, retries, and the hierarchy move
+> workaround still need hardening before unattended destructive synchronization. See the
+> [codebase audit](docs/codebase-audit.md).
+
+## Confluence support policy
+
+- Target: Confluence Data Center 9.2.x, using Atlassian's versioned 9.2 documentation.
+- Content representation: Confluence storage format for page creation and update.
+- Authentication: Data Center Personal Access Token (preferred) or Basic authentication.
+- Deletion: report only, do nothing, or the documented content `DELETE` operation, which
+  moves a current page to the space trash.
+- Page archive is not offered because it is not a documented 9.2 content operation.
+- Appfire `math`/`mathinline` macros are optional and require the relevant marketplace app.
+
+Official references: [9.2 release notes](https://confluence.atlassian.com/doc/confluence-9-2-release-notes-1456345480.html),
+[9.2 REST content resource](https://developer.atlassian.com/server/confluence/rest/v9214/api-group-content-resource/),
+[storage format](https://confluence.atlassian.com/conf92/confluence-storage-format-1477576006.html),
+and [REST examples](https://developer.atlassian.com/server/confluence/confluence-rest-api-examples/).
 
 ## Installation
 
-### Via BRAT (Recommended)
-1. Install [BRAT](https://github.com/TfTHacker/obsidian42-brat) from Obsidian Community Plugins
-2. In BRAT settings, click "Add Beta Plugin"
-3. Enter: `https://github.com/aaronsb/obsidian-to-confluence`
-4. Enable "Confluence Integration" in your Community Plugins
+### BRAT
 
-### Manual Installation
-1. Download `main.js` and `manifest.json` from the [latest release](https://github.com/aaronsb/obsidian-to-confluence/releases/latest)
-2. Create folder `your-vault/.obsidian/plugins/confluence-integration/`
-3. Copy the files into this folder
-4. Enable "Confluence Integration" in Community Plugins
+1. Install [BRAT](https://github.com/TfTHacker/obsidian42-brat) from Obsidian Community
+   Plugins.
+2. Choose **Add Beta Plugin** in BRAT settings.
+3. Enter `https://github.com/aaronsb/obsidian-to-confluence`.
+4. Enable **Confluence Integration**.
+
+### Manual
+
+1. Download `main.js` and `manifest.json` from the
+   [latest release](https://github.com/aaronsb/obsidian-to-confluence/releases/latest).
+2. Copy them into `.obsidian/plugins/confluence-integration/` in the vault.
+3. Enable **Confluence Integration** in Community Plugins.
 
 ## Configuration
 
-### Required Settings
+Open **Settings → Community plugins → Confluence Integration**.
 
-Open the plugin settings (Settings → Plugin Options → Confluence Integration) and configure:
+1. **Confluence base URL** — the full Data Center application URL, including a context
+   path if the instance uses one. Examples:
+   `https://confluence.example.com` or `https://intranet.example.com/confluence`.
+   Do not append `/rest/api`.
+2. **Authentication method** — use a Personal Access Token when available, or a Data
+   Center username and password. Use **Test connection** before publishing.
+3. **Confluence parent page ID** — the numeric page ID below which content is managed.
+4. **Folder to publish** — an Obsidian folder such as `Work/Documentation`. Leave it
+   empty to use the vault root.
 
-1. **Confluence Base URL** 
-   - Your Atlassian instance URL
-   - Example: `https://your-company.atlassian.net`
-   - ⚠️ No trailing slash
+Credentials are currently persisted in Obsidian plugin data, which may live in a synced
+vault. Restrict the service account to the intended space, use HTTPS, and protect the
+vault configuration accordingly.
 
-2. **Atlassian User Name**
-   - Your Atlassian account email address
-   - Example: `your.email@company.com`
+Useful settings include:
 
-3. **Atlassian API Token**
-   - **NOT your password!**
-   - Generate at: https://id.atlassian.com/manage-profile/security/api-tokens
-   - Click "Create API token" and copy the generated token
+- preserve the folder structure with README/index notes as folder landing pages;
+- use the first H1 as the page title and deduplicate colliding titles;
+- emit a Page Properties panel from selected frontmatter;
+- map taxonomy fields to Confluence labels;
+- skip unchanged notes, tune batch size, and add a delay between batches;
+- report or trash pages whose source note disappeared, with a removal safety cap.
 
-4. **Confluence Parent Id**
-   - The Confluence page ID where notes will be published as child pages
-   - To find: Open your target page in Confluence, the ID is in the URL
-   - Example: `https://your-company.atlassian.net/wiki/spaces/SPACE/pages/123456789/Page+Title`
-   - The ID is: `123456789`
+## Publishing
 
-5. **Folder To Publish**
-   - The Obsidian folder containing notes to publish
-   - Use `/` to publish entire vault
-   - Use folder name like `Documentation` to publish only that folder
-   - ⚠️ **Required even when publishing single files**
+- **Publish all to Confluence** publishes the configured scope.
+- **Publish current file to Confluence** publishes the active note.
+- **Force republish all to Confluence** ignores the local content-hash cache.
+- The ribbon cloud icon publishes all.
 
-### Optional Settings
+Control individual notes with YAML frontmatter:
 
-- **First Header Page Name**: Use the first heading as the Confluence page title instead of the filename
-
-## How It Works
-
-### Publishing Workflow
-
-1. The plugin publishes notes from your configured **"Folder To Publish"** to Confluence
-2. Each note becomes a child page under your configured **Parent Page ID**
-3. The folder structure in Obsidian is preserved in Confluence
-
-### Publishing Methods
-
-#### Method 1: Publish All (Folder)
-- Click the **cloud icon** in the ribbon, OR
-- Use command: **"Publish All to Confluence"**
-- Publishes ALL notes in the configured folder
-
-#### Method 2: Publish Current File
-- Use command: **"Publish Current File to Confluence"**
-- Publishes only the active note
-- ⚠️ Still requires "Folder To Publish" to be configured
-
-### Controlling What Gets Published
-
-#### Include Specific Files Outside the Folder
-Add this frontmatter to any note outside your configured folder:
 ```yaml
 ---
-connie-publish: true
+connie-publish: true       # include a note outside the configured folder
+connie-title: Guide        # optional explicit Confluence title
+tags:
+  - operations
 ---
 ```
 
-#### Exclude Specific Files Inside the Folder
-Add this frontmatter to notes you want to skip:
-```yaml
----
-connie-publish: false
----
+Set `connie-publish: false` to exclude a note. Existing `connie-page-id` values are used
+to update pages, but the current implementation does not yet prove that a supplied ID is
+owned by this plugin and inside the configured tree. Review frontmatter IDs before a
+bulk run.
+
+## Rendering features
+
+- headings, paragraphs, emphasis, strike-through, code, block quotes, lists, ordered-list
+  starts, task lists, tables, horizontal rules, links, and images;
+- Obsidian wikilinks and relative Markdown links, including heading anchors;
+- Obsidian comments and highlights;
+- Obsidian callouts mapped to stock Confluence info, note, warning, and tip panels;
+- Mermaid diagrams rendered to PNG attachments;
+- optional LaTeX rendering through Appfire macros;
+- Page Properties metadata and taxonomy-derived labels;
+- nested folder pages with deterministic title disambiguation.
+
+## Safe bulk-publish workflow
+
+1. Use a dedicated, least-privilege Confluence account and a non-production parent page.
+2. Test the connection and publish a representative subset.
+3. Inspect links, attachments, labels, callouts, hierarchy, and non-ASCII content.
+4. Leave deleted-note handling on **Report only** until the generated tree is accepted.
+5. Back up Confluence and the vault before enabling trash reconciliation.
+6. Review console errors after every large run; the client does not yet implement bounded
+   retries or transaction-style rollback.
+
+## Development
+
+```bash
+npm ci --ignore-scripts
+npm test
+npm run lint
+npm run prettier-check
+npm run build
 ```
 
-#### Enable/Disable Publishing Per File
-Use these commands on any open note:
-- **"Enable publishing to Confluence"** - Adds `connie-publish: true`
-- **"Disable publishing to Confluence"** - Adds `connie-publish: false`
+`main.js` is the generated Obsidian plugin bundle and is intentionally committed.
 
-## Example Setup
-
-1. Create a folder in your vault: `Work/Documentation`
-2. In settings, set "Folder To Publish" to `Work/Documentation`
-3. Add your Confluence credentials and parent page ID
-4. Place notes you want to publish in `Work/Documentation`
-5. Click the cloud icon to publish all, or use commands for specific files
-
-## Troubleshooting
-
-### "No paths provided" Error
-- Ensure "Folder To Publish" is configured in settings
-- This is required even when publishing single files
-
-### "Not logged in" Error
-- Verify your Confluence URL (no trailing slash)
-- Check your email is correct
-- Ensure you're using an API token, not your password
-- API tokens expire - you may need to generate a new one
-
-### Debug Mode
-Open Developer Console (`Ctrl+Shift+I` or `Cmd+Option+I`) to see:
-- Authentication attempts
-- Publishing progress
-- Detailed error messages
-
-### React Warnings
-These are cosmetic issues and don't affect functionality.
+The repository also contains a detailed
+[Python CLI and library specification](docs/python-implementation-spec.md) for a
+Data Center-native replacement designed for safe migrations of hundreds of files.
 
 ## Requirements
 
-- Obsidian 1.0.0+
-- Atlassian Cloud instance
-- Confluence permissions to create/edit pages
-
-## Issues & Support
-
-Issues: https://github.com/aaronsb/obsidian-to-confluence/issues
+- Obsidian 1.5.0 or newer (see `manifest.json` for the authoritative minimum)
+- Confluence Data Center 9.2.x
+- permission to read the target tree and create/update content and attachments
 
 ## License
 
-Licensed under [Apache 2.0](LICENSE)
+[Apache 2.0](LICENSE)

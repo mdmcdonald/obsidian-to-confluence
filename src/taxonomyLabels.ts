@@ -4,12 +4,7 @@
 // dependency-free (no `obsidian` import) so it can be unit-tested directly.
 
 /** Frontmatter fields that can be projected onto Confluence labels. */
-export type TaxonomyLabelField =
-	| "subject"
-	| "type"
-	| "domain"
-	| "status"
-	| "lifecycle_phase";
+export type TaxonomyLabelField = "subject" | "type" | "domain" | "status" | "lifecycle_phase";
 
 /**
  * Slugify a taxonomy term / scalar into a Confluence-label-safe token. Confluence

@@ -67,6 +67,24 @@ test("transformText leaves inline code untouched", () => {
 	assert.equal(out, "a `==code==` b");
 });
 
+test("transformText protects multi-backtick inline code", () => {
+	const input = "before ``code with ` and [[Page]]`` after [[Page]]";
+	const out = transformText(input, (s) => s.replaceAll("[[Page]]", "LINK"));
+	assert.equal(out, "before ``code with ` and [[Page]]`` after LINK");
+});
+
+test("transformText protects indented code blocks", () => {
+	const input = "    [[Page]] and $math$\n\n    %%comment%%\noutside [[Page]]";
+	const out = transformText(input, (s) => s.replaceAll("[[Page]]", "LINK"));
+	assert.equal(out, "    [[Page]] and $math$\n\n    %%comment%%\noutside LINK");
+});
+
+test("transformText honours fences longer than three markers", () => {
+	const input = "````markdown\n```\n[[Page]]\n```\n````\noutside [[Page]]";
+	const out = transformText(input, (s) => s.replaceAll("[[Page]]", "LINK"));
+	assert.equal(out, "````markdown\n```\n[[Page]]\n```\n````\noutside LINK");
+});
+
 test("segmentMarkdown round-trips byte-for-byte", () => {
 	const md = "para\n\n```js\ncode\n```\n\n`inline` and ~~~\nfence\n~~~\n";
 	assert.equal(segmentMarkdown(md).map((s) => s.text).join(""), md);
@@ -284,9 +302,14 @@ test("a leading > in a table cell is escaped (not a blockquote)", () => {
 // ---------------------------------------------------------------------------
 
 test("markdown link to a published .md file becomes a wikilink sentinel", () => {
+	let resolvedTarget = "";
 	const out = preprocessMarkdownLinks("see [the guide](../arch/L2-06.md) here", {
-		resolve: () => publishable("L2-06 Control Laser"),
+		resolve: (target) => {
+			resolvedTarget = target;
+			return publishable("L2-06 Control Laser");
+		},
 	});
+	assert.equal(resolvedTarget, "../arch/L2-06");
 	const m = out.match(/`confluence-wikilink:[^`]+`/);
 	assert.ok(m, out);
 	assert.deepEqual(decodeSentinel(m![0]), { kind: "page", title: "L2-06 Control Laser", display: "the guide" });
@@ -302,6 +325,11 @@ test("markdown .md link with nested brackets in text resolves", () => {
 test("markdown .md link with a heading anchor carries the anchor", () => {
 	const out = preprocessMarkdownLinks("[t](page.md#Overview)", { resolve: () => publishable("Page") });
 	assert.deepEqual(decodeSentinel(out), { kind: "page", title: "Page", anchor: "Overview", display: "t" });
+});
+
+test("markdown .md block references link to the page without a false heading anchor", () => {
+	const out = preprocessMarkdownLinks("[t](page.md#^block-id)", { resolve: () => publishable("Page") });
+	assert.deepEqual(decodeSentinel(out), { kind: "page", title: "Page", display: "t" });
 });
 
 test("markdown .md link to an unpublished file falls back to text; external untouched", () => {
@@ -629,6 +657,45 @@ test("a bodied macro (bodiedExtension) wraps its children in rich-text-body", ()
 	);
 });
 
+test("task lists use the documented Data Center storage structure", () => {
+	const out = convertAdfToStorageFormat({
+		type: "doc",
+		content: [
+			{
+				type: "taskList",
+				content: [
+					{ type: "taskItem", attrs: { state: "TODO" }, content: [{ type: "text", text: "Open" }] },
+					{ type: "taskItem", attrs: { state: "DONE" }, content: [{ type: "text", text: "Done" }] },
+				],
+			},
+		],
+	});
+	assert.equal(
+		out,
+		'<ac:task-list><ac:task><ac:task-status>incomplete</ac:task-status><ac:task-body>Open</ac:task-body></ac:task><ac:task><ac:task-status>complete</ac:task-status><ac:task-body>Done</ac:task-body></ac:task></ac:task-list>',
+	);
+});
+
+test("mentions and status colours use Data Center storage attributes", () => {
+	const out = convertAdfToStorageFormat({
+		type: "doc",
+		content: [
+			{ type: "mention", attrs: { id: "user-key" } },
+			{ type: "status", attrs: { text: "Blocked", color: "purple" } },
+		],
+	});
+	assert.match(out, /<ri:user ri:userkey="user-key" \/>/);
+	assert.match(out, /<ac:parameter ac:name="colour">Blue<\/ac:parameter>/);
+});
+
+test("code macro CDATA safely preserves a literal CDATA terminator", () => {
+	const out = convertAdfToStorageFormat({
+		type: "codeBlock",
+		content: [{ type: "text", text: "before ]]> after" }],
+	});
+	assert.match(out, /before \]\]\]\]><!\[CDATA\[> after/);
+});
+
 test("panel title as its own paragraph (blank line) is lifted into the title", () => {
 	const out = convertAdfToStorageFormat({
 		type: "doc",
@@ -716,4 +783,3 @@ test("integration: a wikilink inside a comment is removed, not linked", () => {
 	assert.equal(md, "keep  end");
 	assert.deepEqual(calls, [], "resolver not called for commented-out link");
 });
-
