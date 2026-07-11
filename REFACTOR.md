@@ -7,8 +7,8 @@ Use these maintained documents instead:
 
 - [Codebase audit](docs/codebase-audit.md) — verified 9.2 API mismatches, resolved items,
   remaining risks, dependency findings, and recommended implementation order.
-- [Python implementation specification](docs/python-implementation-spec.md) — the
-  Data Center-native CLI and reusable-library replacement plan.
+- [Relocated Python implementation specification](https://github.com/mdmcdonald/theunderclass/blob/main/tools/md2conf/docs/spec.md) —
+  the Data Center-native CLI and reusable-library replacement plan.
 
 The strategic direction is to retire the abandoned `@markdown-confluence/lib`, use
 Confluence storage format end to end, own page/attachment/label reconciliation, and

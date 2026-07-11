@@ -2,22 +2,11 @@
 
 ## Unreleased
 
-### Python Data Center publisher
+### Python publisher relocation
 
-* Add the typed `md2conf_dc` Python library and `md2conf` CLI for Confluence Data Center
-  9.2, with strict configuration and secret resolution, deterministic Markdown and
-  Obsidian storage rendering, stable hierarchy and link indexing, assets, state, and
-  structured diagnostics.
-* Add ownership-safe read-only planning, immutable plan digests, bounded execution,
-  conflict protection, managed labels and attachments, guarded orphan handling,
-  checkpoints, cancellation, and typed event/report streams.
-* Keep frontend concerns outside the application core and publish an async/sync API plus
-  a GUI integration contract for a later graphical frontend.
-* Add exact source-scope and target rebind approvals, mandatory guarded-mutation adapters,
-  tamper-resistant page bodies, bounded nonblocking observers, cooperative SIGINT
-  cancellation, managed cache sentinels, and redacted extension/parser diagnostics.
-* Add Python 3.11–3.13 cross-platform CI, strict typing, formatting/linting, contract
-  guards, golden rendering tests, and fault-oriented planner/client tests.
+* Move the Data Center-native Python application, specification and test suite to the
+  standalone [`md2conf` tool](https://github.com/mdmcdonald/theunderclass/tree/main/tools/md2conf).
+  This repository continues to host the legacy Obsidian plugin.
 
 ### Data Center 9.2 audit and hardening
 

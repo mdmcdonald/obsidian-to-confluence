@@ -199,7 +199,8 @@ reported successful, and the old Atlaskit dependency tree carries substantial se
 and peer-dependency debt.
 
 Replace it with an owned Markdown AST → typed page model → storage renderer → typed 9.2
-REST client. The accompanying Python specification defines that target architecture.
+REST client. The Python successor and its specification now live in the
+[`md2conf` tool](https://github.com/mdmcdonald/theunderclass/tree/main/tools/md2conf).
 
 ### P1 — Credentials and transport need hardening
 
@@ -287,6 +288,6 @@ available, or remove them in the next documentation-assets pass.
 9. Remove the abandoned publisher/Atlaskit tree and duplicate command/UI flows.
 10. Validate against a real 9.2 test instance with functional and visual golden fixtures.
 
-The [Python implementation specification](python-implementation-spec.md) turns this order
-into a standalone CLI and reusable-library product plan, with parity as the minimum and
-navigability/visual quality as first-class requirements.
+The relocated [Python implementation specification](https://github.com/mdmcdonald/theunderclass/blob/main/tools/md2conf/docs/spec.md)
+turns this order into a standalone CLI and reusable-library product plan, with parity as
+the minimum and navigability/visual quality as first-class requirements.
