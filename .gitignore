@@ -1,6 +1,16 @@
 node_modules/
 dist/
 dist-tests/
+.venv/
+.md2conf/
+__pycache__/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+*.egg-info/
 *.log
 .DS_Store
 .claude/settings.local.json

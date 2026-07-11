@@ -135,6 +135,49 @@ The repository also contains a detailed
 [Python CLI and library specification](docs/python-implementation-spec.md) for a
 Data Center-native replacement designed for safe migrations of hundreds of files.
 
+### Python CLI and library
+
+The Data Center-native Python implementation lives in `src/md2conf_dc`. It is designed
+as a reusable asynchronous application API; the `md2conf` CLI is a thin adapter over the
+same immutable plans, diagnostics, events, approvals, cancellation, and reports that a
+future GUI will consume. See the [GUI integration contract](docs/python-gui-integration.md).
+
+```bash
+python3.11 -m venv .venv
+.venv/bin/pip install -e '.[dev]'
+.venv/bin/md2conf init /path/to/vault
+export MD2CONF_PAT='...'
+.venv/bin/md2conf --config /path/to/vault/.md2conf.toml doctor
+.venv/bin/md2conf --config /path/to/vault/.md2conf.toml validate
+.venv/bin/md2conf --config /path/to/vault/.md2conf.toml plan
+.venv/bin/md2conf --config /path/to/vault/.md2conf.toml publish --dry-run
+```
+
+`plan` and `--dry-run` are read-only. Destructive or adoption work is applied only when
+`--approve-plan` exactly matches the displayed digest. `md2conf state scope` shows the
+durable and configured source-scope fingerprints; a scope change remains blocked until
+`state rebind-scope` receives the exact reviewed fingerprint. Target rebinding similarly
+performs a fresh online preflight instead of accepting a URL or credential on the command
+line.
+
+The Python application accepts an allowlisted Mermaid renderer through
+`PublisherDependencies`; it does not silently execute an arbitrary renderer discovered on
+`PATH`. The stock CLI currently reports a clear validation error for Mermaid fences until
+an approved backend is supplied by an embedding application.
+
+Python quality gates are `ruff check .`, `ruff format --check .`,
+`mypy --strict src tests_python`, and `pytest`.
+
+The mocked contract suite does not replace live certification. Before enabling trash in
+production, run the gated create/update/no-op/conflict/interruption cycle against the exact
+licensed Confluence Data Center 9.2 patch level in use.
+
+Ambiguous writes fail closed. If a create response is lost before Confluence returns an
+ID, the source remains `create_pending` and another create is refused; locate the page and
+use the exact-digest `md2conf adopt PATH PAGE_ID` workflow. If a new attachment response
+is lost before its ownership marker is written, remove or explicitly reconcile that
+unmarked attachment before resuming. The publisher never guesses by title or filename.
+
 ## Requirements
 
 - Obsidian 1.5.0 or newer (see `manifest.json` for the authoritative minimum)
