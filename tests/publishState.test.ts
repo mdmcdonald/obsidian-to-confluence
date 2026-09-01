@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { detectOrphans, exceedsRemovalCap, PublishRecord } from "../src/publishState";
+import { detectOrphans, exceedsRemovalCap, planLabelChanges, PublishRecord } from "../src/publishState";
 
 const rec = (pageId: string, hash = "h"): PublishRecord => ({ pageId, hash });
 
@@ -65,4 +65,71 @@ test("delete + move together", () => {
 	const { kept, orphanPageIds } = detectOrphans(records, new Set(["a.md", "b2.md"]));
 	assert.deepEqual(orphanPageIds, ["3"]);
 	assert.deepEqual(kept, { "a.md": rec("1"), "b2.md": rec("2") });
+});
+
+// ---------------------------------------------------------------------------
+// F8 — label ownership
+//
+// The rule the whole feature turns on: the plugin only ever removes labels it
+// applied itself. Anything a human added in Confluence survives a republish.
+// ---------------------------------------------------------------------------
+
+test("a first publish adds its labels and removes nothing", () => {
+	const plan = planLabelChanges(undefined, ["radar", "type-hub"], []);
+	assert.deepEqual(plan.toAdd, ["radar", "type-hub"]);
+	assert.deepEqual(plan.toRemove, []);
+	assert.deepEqual(plan.toPreserve, []);
+});
+
+test("a label the plugin owned and no longer derives is removed", () => {
+	const plan = planLabelChanges(["radar", "legacy"], ["radar"], ["radar", "legacy"]);
+	assert.deepEqual(plan.toAdd, []);
+	assert.deepEqual(plan.toRemove, ["legacy"]);
+});
+
+test("a label a human added in Confluence is never removed, only preserved", () => {
+	const plan = planLabelChanges(["radar"], ["radar"], ["radar", "added-by-hand"]);
+	assert.deepEqual(plan.toRemove, []);
+	assert.deepEqual(plan.toPreserve, ["added-by-hand"]);
+	assert.deepEqual(plan.toAdd, []);
+});
+
+test("a manual label the plugin now also derives is not listed for preservation", () => {
+	// It is in `current`, so the normal publish path applies it anyway.
+	const plan = planLabelChanges(["radar"], ["radar", "added-by-hand"], ["radar", "added-by-hand"]);
+	assert.deepEqual(plan.toPreserve, []);
+	assert.deepEqual(plan.toAdd, []);
+	assert.deepEqual(plan.toRemove, []);
+});
+
+test("a label the plugin owned but that is already gone remotely is not re-removed", () => {
+	const plan = planLabelChanges(["radar", "legacy"], ["radar"], ["radar"]);
+	assert.deepEqual(plan.toRemove, []);
+});
+
+test("a derived label missing remotely is added", () => {
+	const plan = planLabelChanges(["radar"], ["radar", "new-one"], ["radar"]);
+	assert.deepEqual(plan.toAdd, ["new-one"]);
+});
+
+test("an unchanged republish issues no label operations at all", () => {
+	const labels = ["radar", "type-hub"];
+	const plan = planLabelChanges(labels, labels, labels);
+	assert.deepEqual(plan.toAdd, []);
+	assert.deepEqual(plan.toRemove, []);
+	assert.deepEqual(plan.toPreserve, []);
+});
+
+test("a page the plugin has never touched keeps every remote label", () => {
+	const plan = planLabelChanges(undefined, [], ["theirs-1", "theirs-2"]);
+	assert.deepEqual(plan.toRemove, []);
+	assert.deepEqual(plan.toPreserve, ["theirs-1", "theirs-2"]);
+});
+
+test("the publish record carries the labels the plugin applied", () => {
+	const record: PublishRecord = { pageId: "1", hash: "h", labels: ["radar"] };
+	assert.deepEqual(record.labels, ["radar"]);
+	// A record written before F8 has no labels, which reads as "owns nothing".
+	const legacy: PublishRecord = { pageId: "1", hash: "h" };
+	assert.deepEqual(planLabelChanges(legacy.labels, [], ["theirs"]).toRemove, []);
 });

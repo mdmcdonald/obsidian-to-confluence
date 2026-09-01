@@ -12,8 +12,8 @@
  * This module rebuilds the tree with:
  *   - a STABLE root = the common path of the WHOLE publishable set (so every
  *     batch nests identically), and
- *   - globally-unique, parent-qualified folder titles (so folders reconcile by
- *     title across batches instead of merging), and
+ *   - globally-unique folder titles taken from each folder's landing file (or a
+ *     display-name map), parent-qualified only when they would collide, and
  *   - README / index / eponymous file promotion to the folder's landing page.
  *
  * Pure and dependency-injected (the markdown→ADF conversion is passed in) so it
@@ -76,6 +76,26 @@ function basename(relPath: string): string {
 	return parts[parts.length - 1] ?? "";
 }
 
+/**
+ * Resolve a relative link target against the DIRECTORY of the linking file,
+ * the way Obsidian and a markdown renderer do: `../` walks up, `./` and empty
+ * segments are dropped. Returns a vault path with no leading slash. Walking
+ * above the vault root is clamped to the root rather than producing "..".
+ */
+export function resolveRelativePath(sourceFilePath: string, target: string): string {
+	const dir = splitPath(sourceFilePath).slice(0, -1);
+	const out = [...dir];
+	for (const segment of target.split("/")) {
+		if (segment === "" || segment === ".") continue;
+		if (segment === "..") {
+			out.pop();
+			continue;
+		}
+		out.push(segment);
+	}
+	return out.join("/");
+}
+
 function stripExt(name: string): string {
 	return name.replace(/\.md$/i, "");
 }
@@ -88,6 +108,13 @@ export interface FolderInfo {
 	parentRel: string; // parent folder's relPath ("" = a top-level folder)
 }
 
+/** A folder with more than one file that could be its landing page. */
+export interface LandingConflict {
+	folderRelPath: string;
+	/** Every candidate, in priority order; the first one is the one used. */
+	candidates: string[];
+}
+
 export interface DerivedStructure {
 	commonPath: string;
 	/** All intermediate folders (relative to commonPath), parent-before-child. */
@@ -96,9 +123,27 @@ export interface DerivedStructure {
 	indexFileByFolder: Map<string, string>;
 	/** vault file path → its containing folder's relPath ("" = directly at root). */
 	folderOfFile: Map<string, string>;
+	/** Folders where several files qualified as the landing page (F6 reports these). */
+	landingConflicts: LandingConflict[];
+	/**
+	 * The landing file of the publish ROOT, when one exists. Only promoted onto
+	 * the configured parent page when `publishRootLanding` is on (F7); it is
+	 * never a folder page, because the root has no folder page of its own.
+	 */
+	rootLandingFile?: string;
 }
 
-const INDEX_BASENAMES = new Set(["index", "readme"]);
+/**
+ * Landing-file priority, highest first. Deterministic (not "first found in
+ * vault order") so a folder's page never changes identity between runs.
+ */
+function landingRank(fileName: string, folderName: string): number {
+	const stem = stripExt(fileName).toLowerCase();
+	if (stem === "index") return 0;
+	if (stem === "readme") return 1;
+	if (stem === folderName.toLowerCase()) return 2;
+	return -1;
+}
 
 /**
  * Derive the folder hierarchy + per-folder landing file from the FULL set of
@@ -130,23 +175,35 @@ export function deriveStructure(allFilePaths: string[]): DerivedStructure {
 		filesInFolder.set(folderRelPath, arr);
 	}
 
-	// Identify each folder's landing file: README/index, else a file whose name
-	// equals the folder name (eponymous). NOT applied to the root ("") — a file
-	// at the common root maps onto the configured parent page and would be lost.
+	// Identify each folder's landing file by a FIXED priority: index.md, then
+	// README.md, then a file named like the folder. A folder with more than one
+	// candidate is a diagnostic (the author should pick one) but still resolves
+	// deterministically.
 	const indexFileByFolder = new Map<string, string>();
-	for (const [folderRelPath, files] of filesInFolder) {
-		if (folderRelPath === "") continue;
-		const folderName = basename(folderRelPath).toLowerCase();
-		let pick: string | undefined;
-		let eponymous: string | undefined;
-		for (const fp of files) {
-			const stem = stripExt(basename(fp)).toLowerCase();
-			if (INDEX_BASENAMES.has(stem)) {
-				pick = pick ?? fp;
-			}
-			if (stem === folderName) eponymous = eponymous ?? fp;
+	const landingConflicts: LandingConflict[] = [];
+	let rootLandingFile: string | undefined;
+
+	const pickLanding = (folderRelPath: string, files: string[], folderName: string) => {
+		const ranked = files
+			.map((fp) => ({ fp, rank: landingRank(basename(fp), folderName) }))
+			.filter((c) => c.rank >= 0)
+			.sort((a, b) => a.rank - b.rank || a.fp.localeCompare(b.fp));
+		if (ranked.length === 0) return undefined;
+		if (ranked.length > 1) {
+			landingConflicts.push({ folderRelPath, candidates: ranked.map((c) => c.fp) });
 		}
-		const landing = pick ?? eponymous;
+		return ranked[0].fp;
+	};
+
+	for (const [folderRelPath, files] of filesInFolder) {
+		if (folderRelPath === "") {
+			// The root has no folder page. A landing file here is only usable when
+			// `publishRootLanding` promotes it onto the configured parent page (F7);
+			// the root folder name is the deepest segment of the common path.
+			rootLandingFile = pickLanding("", files, basename(commonPath));
+			continue;
+		}
+		const landing = pickLanding(folderRelPath, files, basename(folderRelPath));
 		if (landing) indexFileByFolder.set(folderRelPath, landing);
 	}
 
@@ -155,7 +212,14 @@ export function deriveStructure(allFilePaths: string[]): DerivedStructure {
 		(a, b) => a.segments.length - b.segments.length || a.relPath.localeCompare(b.relPath),
 	);
 
-	return { commonPath, folders: ordered, indexFileByFolder, folderOfFile };
+	return {
+		commonPath,
+		folders: ordered,
+		indexFileByFolder,
+		folderOfFile,
+		landingConflicts,
+		...(rootLandingFile ? { rootLandingFile } : {}),
+	};
 }
 
 // --- Folder title assignment (parent-qualified, collision-safe) -------------
@@ -170,50 +234,115 @@ function hash6(s: string): string {
 	return (h >>> 0).toString(16).padStart(8, "0").slice(0, 6);
 }
 
+/** Where a folder's final title came from — surfaced in the dry-run report. */
+export type FolderTitleOrigin = "landing" | "display-map" | "segment" | "qualified" | "hash";
+
+export interface FolderTitleOptions {
+	/**
+	 * The title this folder would like: its landing file's resolved title, or a
+	 * display-name override. Returning undefined keeps the bare segment name.
+	 */
+	preferredTitle?: (folderRelPath: string) => { title: string; origin: FolderTitleOrigin } | undefined;
+}
+
+export interface FolderTitleResult {
+	titles: Map<string, string>;
+	origins: Map<string, FolderTitleOrigin>;
+}
+
 /**
  * Assign a unique title to every folder.
  *
- * A folder keeps its bare name ONLY if that name is globally unique (no other
- * folder and no file page uses it). Otherwise EVERY folder sharing the name is
- * parent-qualified ("Parent / Name", then "Grandparent / Parent / Name", …),
- * with a "Name (hash6)" fallback. Qualifying all colliding folders symmetrically
- * (rather than letting the first keep the bare name) keeps a folder's title
- * stable when an unrelated sibling is added or removed.
+ * A folder keeps its preferred title (landing file title, display-name entry,
+ * or bare segment name) ONLY if that title is globally unique — no other folder
+ * and no file page uses it. Otherwise EVERY folder sharing the title is
+ * qualified with its PARENT'S PREFERRED TITLE ("Radar Architecture / Operational
+ * functions (L1A)"), deepening as needed, with a "Name (hash6)" last resort.
+ * Qualifying all colliding folders symmetrically (rather than letting the first
+ * keep the bare name) keeps a folder's title stable when an unrelated sibling
+ * is added or removed.
+ *
+ * The qualifier is the ancestor's PREFERRED title, not its final one: a reader
+ * sees the landing/display name they recognise, and a parent that was itself
+ * qualified or hashed does not drag that suffix into every descendant. In
+ * "segment" mode preferred titles are just path segments, so qualification is
+ * byte-for-byte what it was before folder titles became configurable.
  */
-export function computeFolderTitles(folders: FolderInfo[], takenTitles: Iterable<string>): Map<string, string> {
+export function computeFolderTitlesDetailed(
+	folders: FolderInfo[],
+	takenTitles: Iterable<string>,
+	opts: FolderTitleOptions = {},
+): FolderTitleResult {
 	const fileTitles = new Set<string>(takenTitles);
-	// Count how many folders share each bare basename.
+
+	// Resolve each folder's preferred title first, so collisions are counted on
+	// the titles we actually intend to publish, not on raw path segments.
+	const preferred = new Map<string, string>();
+	const origins = new Map<string, FolderTitleOrigin>();
+	for (const f of folders) {
+		const pref = opts.preferredTitle?.(f.relPath);
+		const seg = basename(f.relPath);
+		preferred.set(f.relPath, pref?.title || seg);
+		origins.set(f.relPath, pref?.title ? pref.origin : "segment");
+	}
+
 	const baseCount = new Map<string, number>();
 	for (const f of folders) {
-		const b = basename(f.relPath);
+		const b = preferred.get(f.relPath) as string;
 		baseCount.set(b, (baseCount.get(b) ?? 0) + 1);
 	}
 
 	const taken = new Set<string>(fileTitles);
 	const result = new Map<string, string>();
+
 	for (const f of folders) {
-		const base = basename(f.relPath);
+		const base = preferred.get(f.relPath) as string;
 		const mustQualify = (baseCount.get(base) ?? 0) > 1 || fileTitles.has(base);
 		let chosen: string | undefined;
-		const startDepth = mustQualify ? 2 : 1;
-		for (let depth = startDepth; depth <= f.segments.length; depth++) {
-			const candidate = f.segments.slice(f.segments.length - depth).join(" / ");
-			if (!taken.has(candidate)) {
-				chosen = candidate;
-				break;
+		let origin: FolderTitleOrigin = origins.get(f.relPath) ?? "segment";
+
+		if (!mustQualify && !taken.has(base)) {
+			chosen = base;
+		} else {
+			// Walk up the ancestry, prefixing each ancestor's PREFERRED title, so
+			// the qualifier a reader sees names the page they'd click through.
+			const ancestors: string[] = [];
+			let rel = f.parentRel;
+			while (rel) {
+				ancestors.push(preferred.get(rel) ?? basename(rel));
+				const segs = splitPath(rel);
+				rel = segs.slice(0, -1).join("/");
+			}
+			for (let depth = 1; depth <= ancestors.length; depth++) {
+				const candidate = [...ancestors.slice(0, depth).reverse(), base].join(" / ");
+				if (!taken.has(candidate)) {
+					chosen = candidate;
+					origin = "qualified";
+					break;
+				}
 			}
 		}
-		// If we forced qualification but the folder has only one segment (a
-		// top-level folder colliding with a file title), fall through to hash.
-		if (chosen === undefined && !mustQualify) chosen = base;
+
 		if (chosen === undefined) {
 			chosen = `${base} (${hash6(f.relPath)})`;
 			while (taken.has(chosen)) chosen = `${chosen}_`;
+			origin = "hash";
 		}
+
 		taken.add(chosen);
 		result.set(f.relPath, chosen);
+		origins.set(f.relPath, origin);
 	}
-	return result;
+	return { titles: result, origins };
+}
+
+/** Backwards-compatible wrapper returning just the title map. */
+export function computeFolderTitles(
+	folders: FolderInfo[],
+	takenTitles: Iterable<string>,
+	opts: FolderTitleOptions = {},
+): Map<string, string> {
+	return computeFolderTitlesDetailed(folders, takenTitles, opts).titles;
 }
 
 /**
@@ -235,6 +364,51 @@ export function assertUniqueTitles(root: FolderTreeNode): void {
 	walk(root, true);
 }
 
+// --- Children Display macro (F11) ------------------------------------------
+
+export type ChildrenMacroMode = "off" | "container-only" | "generated-landings" | "all";
+
+/**
+ * A Children Display macro as an ADF inlineExtension, which
+ * AdfToStorageFormat.convertExtension renders as `<ac:structured-macro
+ * ac:name="children">`. Depth 1 + title sort gives a folder page a clickable
+ * index of its immediate children.
+ */
+export function childrenMacroNode(): Any {
+	return {
+		type: "paragraph",
+		content: [
+			{
+				type: "inlineExtension",
+				attrs: {
+					extensionType: "com.atlassian.confluence.macro.core",
+					extensionKey: "children",
+					parameters: {
+						macroParams: {
+							depth: { value: "1" },
+							sort: { value: "title" },
+						},
+					},
+				},
+			},
+		],
+	};
+}
+
+/** Whether a folder page in this mode gets a Children Display macro appended. */
+export function wantsChildrenMacro(mode: ChildrenMacroMode, hasLanding: boolean, generatedLanding: boolean): boolean {
+	switch (mode) {
+		case "off":
+			return false;
+		case "all":
+			return true;
+		case "container-only":
+			return !hasLanding;
+		case "generated-landings":
+			return hasLanding && generatedLanding;
+	}
+}
+
 // --- Tree assembly ----------------------------------------------------------
 
 export interface BuildTreeContext {
@@ -247,12 +421,29 @@ export interface BuildTreeContext {
 	folderFileAdf: Any;
 	/** convertMDtoADF(markdownFile) → LocalAdfFile (parses markdown to ADF). */
 	convertFile: (markdownFile: Any) => Any;
+	/** Children Display macro policy (F11). Defaults to "off". */
+	childrenMacro?: ChildrenMacroMode;
+	/**
+	 * The publish root's landing file, promoted into the root carrier so its
+	 * content becomes the configured parent page's body (F7). Undefined keeps
+	 * today's behaviour: the root file is published as an ordinary child page.
+	 */
+	rootLandingFile?: string;
+	/** The configured parent page's current title; the root is never renamed. */
+	rootPageTitle?: string;
 }
 
 interface RawNode {
 	name: string;
 	children: Map<string, RawNode>;
 	markdownFile?: Any; // the source MarkdownFile for a leaf
+}
+
+/** Deep-ish clone of an ADF document before we append to its content array. */
+function withAppendedContent(contents: Any, extra: Any): Any {
+	if (!contents || typeof contents !== "object") return contents;
+	const content = Array.isArray(contents.content) ? [...contents.content, extra] : [extra];
+	return { ...contents, content };
 }
 
 /**
@@ -262,6 +453,7 @@ interface RawNode {
  */
 export function buildTree(markdownFiles: Any[], ctx: BuildTreeContext): FolderTreeNode {
 	const root: RawNode = { name: ctx.commonPath, children: new Map() };
+	const childrenMode: ChildrenMacroMode = ctx.childrenMacro ?? "off";
 
 	const promoted = new Set<string>(); // vault paths consumed as a folder landing page
 	for (const f of markdownFiles) {
@@ -272,6 +464,10 @@ export function buildTree(markdownFiles: Any[], ctx: BuildTreeContext): FolderTr
 		const landing = ctx.indexFileByFolder.get(folderRelPath);
 		if (landing === f.absoluteFilePath) {
 			promoted.add(f.absoluteFilePath); // handled as the folder page, not a leaf
+		}
+		// The root landing file becomes the root carrier's body, not a child page.
+		if (ctx.rootLandingFile && ctx.rootLandingFile === f.absoluteFilePath) {
+			promoted.add(f.absoluteFilePath);
 		}
 	}
 
@@ -326,6 +522,8 @@ export function buildTree(markdownFiles: Any[], ctx: BuildTreeContext): FolderTr
 		}
 	}
 
+	const isGenerated = (mf: Any): boolean => mf?.frontmatter?.generated === true;
+
 	// Resolve a folder node's relPath by walking names from the root.
 	const finalize = (raw: RawNode, parentRel: string, isRoot: boolean): FolderTreeNode => {
 		const relPath = isRoot ? "" : parentRel ? `${parentRel}/${raw.name}` : raw.name;
@@ -344,12 +542,26 @@ export function buildTree(markdownFiles: Any[], ctx: BuildTreeContext): FolderTr
 			if (landingRaw) {
 				const converted = ctx.convertFile(landingRaw);
 				file = { ...converted, pageTitle: title };
+				if (wantsChildrenMacro(childrenMode, true, isGenerated(landingRaw))) {
+					file.contents = withAppendedContent(file.contents, childrenMacroNode());
+				}
 			} else {
 				file = makeFolderFile(title, ctx);
+				if (childrenMode === "container-only" || childrenMode === "all") {
+					// Replace the Page Tree placeholder with a Children Display index.
+					file.contents = { type: "doc", version: 1, content: [childrenMacroNode()] };
+				}
 			}
 		} else {
 			// Root carrier (mapped to the configured parent page; never created).
-			file = makeFolderFile(raw.name, ctx);
+			const rootLandingRaw = ctx.rootLandingFile ? findPromotedSource(markdownFiles, ctx.rootLandingFile) : undefined;
+			if (rootLandingRaw) {
+				const converted = ctx.convertFile(rootLandingRaw);
+				// The parent page keeps its own title — only its body is replaced.
+				file = { ...converted, pageTitle: ctx.rootPageTitle ?? converted.pageTitle };
+			} else {
+				file = makeFolderFile(raw.name, ctx);
+			}
 		}
 
 		for (const child of raw.children.values()) {

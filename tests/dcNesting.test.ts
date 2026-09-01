@@ -159,3 +159,86 @@ test("planReparents: skips root carrier, unresolved pages, and already-correct p
 	]);
 	assert.deepEqual(moves, [{ pageId: "C", targetId: "D", title: "move-me" }]);
 });
+
+// --- F7: the root landing must never be moved ----------------------------------
+
+test("F7: promoting the root landing plans no move for the parent page itself", async () => {
+	// With publishRootLanding on, the publish root's index note becomes the body
+	// of the CONFIGURED PARENT page. That page is not ours to re-parent: it lives
+	// wherever the user put it, and a move would tear it out of their space.
+	const PATHS_WITH_ROOT = ["TopFolder/index.md", ...PATHS];
+	const structure = deriveStructure(PATHS_WITH_ROOT);
+	assert.equal(structure.rootLandingFile, "TopFolder/index.md");
+
+	const folderTitle = computeFolderTitles(
+		structure.folders,
+		PATHS_WITH_ROOT.map((p) => p.split("/").pop()!.replace(/\.md$/, "")),
+	);
+	const files = PATHS_WITH_ROOT.map(mkFile);
+	const tree = buildTree(files, {
+		commonPath: structure.commonPath,
+		folderTitle,
+		indexFileByFolder: structure.indexFileByFolder,
+		folderFileAdf: { ...ADF },
+		convertFile: (mf: any) => ({
+			folderName: "",
+			absoluteFilePath: mf.absoluteFilePath,
+			fileName: mf.fileName,
+			contents: { ...ADF },
+			pageTitle: mf.pageTitle,
+			frontmatter: {},
+			tags: [],
+			pageId: mf.pageId,
+			dontChangeParentPageId: false,
+			contentType: "page",
+			blogPostDate: undefined,
+		}),
+		rootLandingFile: "TopFolder/index.md",
+		rootPageTitle: "Knowledge Base",
+	});
+
+	// The root carrier now holds the landing note under the parent's own title.
+	assert.equal((tree as any).file.absoluteFilePath, "TopFolder/index.md");
+	assert.equal((tree as any).file.pageTitle, "Knowledge Base");
+
+	const mc = mockClient({}, false);
+	const published: any[] = await ensureAllFilesExistInConfluence(
+		mc.client as any,
+		adaptor,
+		tree as any,
+		"SP",
+		PARENT,
+		PARENT,
+		settings,
+	);
+	const moves = planReparents(published);
+
+	// No move targets the parent page, and the landing note never became a page
+	// of its own to be moved.
+	assert.equal(
+		moves.some((m) => m.pageId === PARENT),
+		false,
+		JSON.stringify(moves),
+	);
+	assert.equal(
+		moves.some((m) => m.title === "index" || m.title === "Knowledge Base"),
+		false,
+		JSON.stringify(moves),
+	);
+	// The rest of the tree is re-parented exactly as it is without a root landing.
+	assert.deepEqual(new Set(moves.map((m) => m.title)), new Set(["File1", "File2", "Folder4", "File3"]));
+});
+
+test("F7: a root node carrying the parent id is skipped by the re-parent plan", () => {
+	// The root carrier is published with the parent's own pageId and no intended
+	// ancestor chain, which is what keeps it out of every move plan.
+	const moves = planReparents([
+		{ file: { pageId: PARENT, pageTitle: "Knowledge Base" }, ancestors: [] },
+		{
+			file: { pageId: "CHILD", pageTitle: "A child" },
+			ancestors: [PARENT],
+			existingPageData: { ancestors: [] },
+		},
+	]);
+	assert.deepEqual(moves, [{ pageId: "CHILD", targetId: PARENT, title: "A child" }]);
+});

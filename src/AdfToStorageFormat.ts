@@ -108,6 +108,11 @@ function convertText(node: AdfNode): string {
 	const LATEX_INLINE_PREFIX = "latex-math-inline:";
 	if (hasCodeMark && rawText.startsWith(LATEX_INLINE_PREFIX)) {
 		const eq = rawText.substring(LATEX_INLINE_PREFIX.length);
+		// Without the Appfire LaTeX Math app installed, `mathinline` renders as an
+		// "unknown macro" error box. The fallback keeps the TeX readable as code.
+		if (activeLatexRendering === "fallback") {
+			return `<code>${escapeHtml(eq)}</code>`;
+		}
 		return (
 			`<ac:structured-macro ac:name="mathinline">` +
 			`<ac:parameter ac:name="body">${escapeHtml(eq)}</ac:parameter>` +
@@ -140,6 +145,11 @@ function renderWikilink(p: WikilinkPayload): string {
 	// docs. NB: fragile for headings with special characters, but the page
 	// link still resolves even when the anchor does not.
 	const anchorAttr = p.anchor ? ` ac:anchor="${escapeHtml(p.anchor.replace(/\s+/g, ""))}"` : "";
+	if (p.kind === "attachment") {
+		// A file uploaded to THIS page (a script, notebook, dataset). Anchors have
+		// no meaning for an attachment, so they are dropped.
+		return `<ac:link>` + `<ri:attachment ri:filename="${escapeHtml(p.filename ?? "")}" />` + body + `</ac:link>`;
+	}
 	if (p.kind === "anchor") {
 		// Same-page heading link — no <ri:page>.
 		return `<ac:link${anchorAttr}>${body}</ac:link>`;
@@ -336,6 +346,14 @@ function convertCodeBlock(node: AdfNode): string {
 	// Block LaTeX: language sentinel set by LatexPreprocessor. Emit the
 	// Appfire mathblock macro instead of a generic code macro.
 	if (language === "latex-math-block") {
+		if (activeLatexRendering === "fallback") {
+			return (
+				`<ac:structured-macro ac:name="code">` +
+				`<ac:parameter ac:name="language">latex</ac:parameter>` +
+				`<ac:plain-text-body><![CDATA[${escapeCdataEnd(code)}]]></ac:plain-text-body>` +
+				`</ac:structured-macro>`
+			);
+		}
 		return (
 			`<ac:structured-macro ac:name="mathblock">` +
 			`<ac:plain-text-body><![CDATA[${escapeCdataEnd(code)}]]></ac:plain-text-body>` +
@@ -356,6 +374,10 @@ function convertCodeBlock(node: AdfNode): string {
 // Set by convertAdfToStorageFormat() and used by convertMedia() to resolve
 // attachment filenames for media nodes that only have collection/id (e.g. mermaid).
 let activeFileMap: Map<string, string> | undefined;
+
+/** LaTeX rendering strategy for the current conversion (see StorageFormatOptions). */
+export type LatexRendering = "appfire" | "fallback";
+let activeLatexRendering: LatexRendering = "appfire";
 
 function convertMedia(node: AdfNode): string {
 	const attrs = node.attrs ?? {};
@@ -809,14 +831,30 @@ function convertNode(node: AdfNode): string {
 	}
 }
 
+export interface StorageFormatOptions {
+	/**
+	 * How to render LaTeX. "appfire" emits the mathblock/mathinline macros (the
+	 * default, correct when the LaTeX Math app is installed); "fallback" emits a
+	 * `latex` code macro / inline `<code>` so the source stays readable on an
+	 * instance without the app, where the macros would render as error boxes.
+	 */
+	latexRendering?: LatexRendering;
+}
+
 /**
  * Convert an ADF document (as parsed JSON object) to Confluence storage format XHTML.
  * @param adf The ADF document JSON
  * @param fileMap Optional map of attachment ID → filename, used to resolve media nodes
  *               that only have id/collection (e.g. mermaid chart attachments)
+ * @param options Rendering options (currently the LaTeX strategy)
  */
-export function convertAdfToStorageFormat(adf: AdfNode, fileMap?: Map<string, string>): string {
+export function convertAdfToStorageFormat(
+	adf: AdfNode,
+	fileMap?: Map<string, string>,
+	options?: StorageFormatOptions,
+): string {
 	activeFileMap = fileMap;
+	activeLatexRendering = options?.latexRendering ?? "appfire";
 	try {
 		if (!adf) return "";
 		if (adf.type === "doc") {
@@ -826,5 +864,6 @@ export function convertAdfToStorageFormat(adf: AdfNode, fileMap?: Map<string, st
 		return convertNode(adf);
 	} finally {
 		activeFileMap = undefined;
+		activeLatexRendering = "appfire";
 	}
 }

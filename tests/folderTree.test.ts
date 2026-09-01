@@ -8,7 +8,10 @@ import {
 	splitPath,
 	deriveStructure,
 	computeFolderTitles,
+	computeFolderTitlesDetailed,
 	buildTree,
+	childrenMacroNode,
+	wantsChildrenMacro,
 } from "../src/folderTree";
 
 // ---------------------------------------------------------------------------
@@ -205,4 +208,279 @@ test("buildTree is consistent across batches (same folder → same title)", () =
 	const single = flatten(buildTree([mk("r/a/architecture/x.md")], ctx)).find((n) => n.title === want);
 	const full = flatten(buildTree(ALL.map(mk), ctx)).find((n) => n.title === want);
 	assert.ok(single && full, `title "${want}" present in both batch builds`);
+});
+
+// ---------------------------------------------------------------------------
+// F2 — deterministic landing selection
+// ---------------------------------------------------------------------------
+
+test("landing selection is index.md, then README.md, then the eponymous file", () => {
+	// All three candidates present: index wins.
+	const all = deriveStructure(["r/Guide/index.md", "r/Guide/README.md", "r/Guide/Guide.md", "r/other.md"]);
+	assert.equal(all.indexFileByFolder.get("Guide"), "r/Guide/index.md");
+
+	// README beats the eponymous file.
+	const readme = deriveStructure(["r/Guide/README.md", "r/Guide/Guide.md", "r/other.md"]);
+	assert.equal(readme.indexFileByFolder.get("Guide"), "r/Guide/README.md");
+
+	// The eponymous file is the last resort.
+	const epon = deriveStructure(["r/Guide/Guide.md", "r/Guide/topic.md", "r/other.md"]);
+	assert.equal(epon.indexFileByFolder.get("Guide"), "r/Guide/Guide.md");
+});
+
+test("landing selection is case-insensitive", () => {
+	const s = deriveStructure(["r/Guide/INDEX.md", "r/Guide/topic.md", "r/other.md"]);
+	assert.equal(s.indexFileByFolder.get("Guide"), "r/Guide/INDEX.md");
+	const s2 = deriveStructure(["r/Guide/ReadMe.md", "r/Guide/topic.md", "r/other.md"]);
+	assert.equal(s2.indexFileByFolder.get("Guide"), "r/Guide/ReadMe.md");
+});
+
+test("a folder with several landing candidates is reported as a conflict", () => {
+	const s = deriveStructure(["r/Guide/index.md", "r/Guide/README.md", "r/other.md"]);
+	assert.equal(s.landingConflicts.length, 1);
+	const conflict = s.landingConflicts[0];
+	assert.equal(conflict.folderRelPath, "Guide");
+	// Candidates are listed in priority order, so the report can mark the winner.
+	assert.deepEqual(conflict.candidates, ["r/Guide/index.md", "r/Guide/README.md"]);
+	// It still resolves deterministically rather than failing.
+	assert.equal(s.indexFileByFolder.get("Guide"), "r/Guide/index.md");
+});
+
+test("a folder with exactly one candidate raises no conflict", () => {
+	const s = deriveStructure(["r/Guide/index.md", "r/Guide/topic.md", "r/other.md"]);
+	assert.deepEqual(s.landingConflicts, []);
+});
+
+// ---------------------------------------------------------------------------
+// F2 — folder titles from landings and display names
+// ---------------------------------------------------------------------------
+
+/** A preferredTitle function backed by a plain map, for the tests below. */
+const prefer =
+	(map: Record<string, { title: string; origin: any }>) =>
+	(relPath: string): { title: string; origin: any } | undefined =>
+		map[relPath];
+
+test("a folder takes its landing file's resolved title", () => {
+	const s = deriveStructure(["r/radar/index.md", "r/radar/x.md", "r/other.md"]);
+	const { titles, origins } = computeFolderTitlesDetailed(s.folders, [], {
+		preferredTitle: prefer({ radar: { title: "Radar", origin: "landing" } }),
+	});
+	assert.equal(titles.get("radar"), "Radar");
+	assert.equal(origins.get("radar"), "landing");
+});
+
+test("the display map is consulted by basename and by relative path, path winning", () => {
+	const s = deriveStructure(["r/a/04_Nodes/x.md", "r/b/04_Nodes/y.md", "r/other.md"]);
+	// The adaptor resolves path-before-basename; the map here models the result.
+	const { titles, origins } = computeFolderTitlesDetailed(s.folders, [], {
+		preferredTitle: prefer({
+			"a/04_Nodes": { title: "Radar node catalogue", origin: "display-map" },
+			"b/04_Nodes": { title: "EW node catalogue", origin: "display-map" },
+		}),
+	});
+	assert.equal(titles.get("a/04_Nodes"), "Radar node catalogue");
+	assert.equal(titles.get("b/04_Nodes"), "EW node catalogue");
+	assert.equal(origins.get("a/04_Nodes"), "display-map");
+});
+
+test("two folders preferring the same title are both qualified by their parent", () => {
+	const s = deriveStructure(["r/radar/layer/x.md", "r/ew/layer/y.md", "r/other.md"]);
+	const preferred = {
+		radar: { title: "Radar Architecture", origin: "landing" as const },
+		ew: { title: "EW Architecture", origin: "landing" as const },
+		"radar/layer": { title: "Operational functions (L1A)", origin: "landing" as const },
+		"ew/layer": { title: "Operational functions (L1A)", origin: "landing" as const },
+	};
+	const { titles, origins } = computeFolderTitlesDetailed(s.folders, [], { preferredTitle: prefer(preferred) });
+
+	// The qualifier is the parent page title a reader would click, not the segment.
+	assert.equal(titles.get("radar/layer"), "Radar Architecture / Operational functions (L1A)");
+	assert.equal(titles.get("ew/layer"), "EW Architecture / Operational functions (L1A)");
+	assert.equal(origins.get("radar/layer"), "qualified");
+	// The parents themselves are unique and keep their preferred titles.
+	assert.equal(titles.get("radar"), "Radar Architecture");
+	assert.equal(titles.get("ew"), "EW Architecture");
+	// Every title in the tree is still unique.
+	const vals = [...titles.values()];
+	assert.equal(new Set(vals).size, vals.length);
+});
+
+test("a preferred title colliding with a file page title is qualified too", () => {
+	const s = deriveStructure(["r/radar/layer/x.md", "r/other.md"]);
+	const { titles } = computeFolderTitlesDetailed(s.folders, ["Operational functions"], {
+		preferredTitle: prefer({
+			radar: { title: "Radar", origin: "landing" },
+			"radar/layer": { title: "Operational functions", origin: "landing" },
+		}),
+	});
+	assert.notEqual(titles.get("radar/layer"), "Operational functions");
+	assert.equal(titles.get("radar/layer"), "Radar / Operational functions");
+});
+
+test("segment mode reproduces the pre-existing titles exactly", () => {
+	// No preferredTitle at all is the "segment" configuration.
+	const s = deriveStructure(["r/radar/architecture/x.md", "r/ew/architecture/y.md", "r/standalone.md"]);
+	const titles = computeFolderTitles(s.folders, ["standalone"]);
+	assert.equal(titles.get("radar"), "radar");
+	assert.equal(titles.get("ew"), "ew");
+	assert.equal(titles.get("radar/architecture"), "radar / architecture");
+	assert.equal(titles.get("ew/architecture"), "ew / architecture");
+});
+
+test("a preferredTitle returning undefined falls back to the folder name", () => {
+	const s = deriveStructure(["r/named/x.md", "r/plain/y.md", "r/other.md"]);
+	const { titles, origins } = computeFolderTitlesDetailed(s.folders, [], {
+		preferredTitle: prefer({ named: { title: "A Real Name", origin: "landing" } }),
+	});
+	assert.equal(titles.get("named"), "A Real Name");
+	assert.equal(titles.get("plain"), "plain");
+	assert.equal(origins.get("plain"), "segment");
+});
+
+// ---------------------------------------------------------------------------
+// F7 — root landing promoted into the parent page
+// ---------------------------------------------------------------------------
+
+test("deriveStructure identifies the root landing file but never makes it a folder", () => {
+	const s = deriveStructure(["r/index.md", "r/a/x.md", "r/b/y.md"]);
+	assert.equal(s.rootLandingFile, "r/index.md");
+	// The root is not a folder page: only a and b are.
+	assert.deepEqual(s.folders.map((f) => f.relPath).sort(), ["a", "b"]);
+	assert.equal(s.indexFileByFolder.has(""), false);
+});
+
+test("the root landing is only promoted when buildTree is given it", () => {
+	const ALL = ["r/index.md", "r/a/x.md"];
+	const s = deriveStructure(ALL);
+	const base = {
+		commonPath: s.commonPath,
+		folderTitle: computeFolderTitles(s.folders, []),
+		indexFileByFolder: s.indexFileByFolder,
+		folderFileAdf,
+		convertFile,
+	};
+
+	// Setting off (no rootLandingFile): the note is an ordinary child page.
+	const off = flatten(buildTree(ALL.map(mk), base));
+	assert.ok(
+		off.some((n) => n.src === "r/index.md" && !n.isFolder),
+		JSON.stringify(off),
+	);
+
+	// Setting on: the note is consumed by the root carrier, not published again.
+	const onTree: any = buildTree(ALL.map(mk), {
+		...base,
+		rootLandingFile: "r/index.md",
+		rootPageTitle: "Knowledge Base",
+	});
+	const on = flatten(onTree);
+	assert.equal(
+		on.some((n) => n.src === "r/index.md"),
+		false,
+		JSON.stringify(on),
+	);
+	// The root carrier holds the converted landing content and the parent's title.
+	assert.equal(onTree.file.absoluteFilePath, "r/index.md");
+	assert.equal(onTree.file.pageTitle, "Knowledge Base");
+	assert.deepEqual(onTree.file.contents, { type: "doc" });
+});
+
+test("without a root landing the root carrier stays the blank placeholder", () => {
+	const ALL = ["r/a/x.md", "r/b/y.md"];
+	const s = deriveStructure(ALL);
+	const tree: any = buildTree(ALL.map(mk), {
+		commonPath: s.commonPath,
+		folderTitle: computeFolderTitles(s.folders, []),
+		indexFileByFolder: s.indexFileByFolder,
+		folderFileAdf,
+		convertFile,
+	});
+	assert.deepEqual(tree.file.contents, folderFileAdf);
+});
+
+// ---------------------------------------------------------------------------
+// F11 — Children Display macro
+// ---------------------------------------------------------------------------
+
+test("wantsChildrenMacro implements each mode", () => {
+	// off: never.
+	assert.equal(wantsChildrenMacro("off", true, true), false);
+	assert.equal(wantsChildrenMacro("off", false, false), false);
+	// all: always.
+	assert.equal(wantsChildrenMacro("all", true, false), true);
+	assert.equal(wantsChildrenMacro("all", false, false), true);
+	// container-only: folders with no landing file.
+	assert.equal(wantsChildrenMacro("container-only", false, false), true);
+	assert.equal(wantsChildrenMacro("container-only", true, false), false);
+	// generated-landings: only a landing marked generated.
+	assert.equal(wantsChildrenMacro("generated-landings", true, true), true);
+	assert.equal(wantsChildrenMacro("generated-landings", true, false), false);
+	assert.equal(wantsChildrenMacro("generated-landings", false, true), false);
+});
+
+test("the children macro node is a depth-1, title-sorted inline extension", () => {
+	const node: any = childrenMacroNode();
+	const ext = node.content[0];
+	assert.equal(ext.type, "inlineExtension");
+	assert.equal(ext.attrs.extensionKey, "children");
+	assert.equal(ext.attrs.extensionType, "com.atlassian.confluence.macro.core");
+	assert.equal(ext.attrs.parameters.macroParams.depth.value, "1");
+	assert.equal(ext.attrs.parameters.macroParams.sort.value, "title");
+});
+
+test("a generated landing gets the macro appended after its own body", () => {
+	const ALL = ["r/Guide/index.md", "r/Guide/topic.md", "r/other.md"];
+	const s = deriveStructure(ALL);
+	const base = {
+		commonPath: s.commonPath,
+		folderTitle: computeFolderTitles(s.folders, []),
+		indexFileByFolder: s.indexFileByFolder,
+		folderFileAdf,
+		// Model a converted document with real body content.
+		convertFile: (mf: any) => ({ ...mf, contents: { type: "doc", content: [{ type: "paragraph" }] } }),
+	};
+	const files = ALL.map((p) => ({ ...mk(p), frontmatter: p.endsWith("index.md") ? { generated: true } : {} }));
+
+	const withMacro: any = buildTree(files, { ...base, childrenMacro: "generated-landings" });
+	const guide = withMacro.children.find((c: any) => c.name === "Guide");
+	assert.equal(guide.file.contents.content.length, 2, "body paragraph plus the macro");
+	assert.equal(guide.file.contents.content[1].content[0].attrs.extensionKey, "children");
+
+	// A non-generated landing is untouched in this mode.
+	const without: any = buildTree(ALL.map(mk), { ...base, childrenMacro: "generated-landings" });
+	const guide2 = without.children.find((c: any) => c.name === "Guide");
+	assert.equal(guide2.file.contents.content.length, 1);
+});
+
+test("container-only replaces the Page Tree placeholder on a landing-less folder", () => {
+	const ALL = ["r/Bare/x.md", "r/other.md"];
+	const s = deriveStructure(ALL);
+	const tree: any = buildTree(ALL.map(mk), {
+		commonPath: s.commonPath,
+		folderTitle: computeFolderTitles(s.folders, []),
+		indexFileByFolder: s.indexFileByFolder,
+		folderFileAdf,
+		convertFile,
+		childrenMacro: "container-only",
+	});
+	const bare = tree.children.find((c: any) => c.name === "Bare");
+	assert.notDeepEqual(bare.file.contents, folderFileAdf);
+	assert.equal(bare.file.contents.content[0].content[0].attrs.extensionKey, "children");
+});
+
+test("the off mode leaves every folder page exactly as it is today", () => {
+	const ALL = ["r/Bare/x.md", "r/Guide/index.md", "r/other.md"];
+	const s = deriveStructure(ALL);
+	const tree: any = buildTree(ALL.map(mk), {
+		commonPath: s.commonPath,
+		folderTitle: computeFolderTitles(s.folders, []),
+		indexFileByFolder: s.indexFileByFolder,
+		folderFileAdf,
+		convertFile,
+	});
+	const bare = tree.children.find((c: any) => c.name === "Bare");
+	assert.deepEqual(bare.file.contents, folderFileAdf);
+	const guide = tree.children.find((c: any) => c.name === "Guide");
+	assert.deepEqual(guide.file.contents, { type: "doc" });
 });

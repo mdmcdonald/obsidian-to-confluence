@@ -1,7 +1,8 @@
 import { Api, Callback, Client, Config, RequestConfig } from "confluence.js";
 import { requestUrl } from "obsidian";
 import { RequiredConfluenceClient } from "@markdown-confluence/lib";
-import { convertAdfToStorageFormat } from "./AdfToStorageFormat";
+import { convertAdfToStorageFormat, type LatexRendering } from "./AdfToStorageFormat";
+import { parseRetryAfter, runWithRetry } from "./retry";
 
 async function getAuthenticationToken(authentication: Config.Authentication | undefined): Promise<string | undefined> {
 	if (!authentication) return undefined;
@@ -25,11 +26,27 @@ const ATLASSIAN_TOKEN_CHECK_FLAG = "X-Atlassian-Token";
 const ATLASSIAN_TOKEN_CHECK_NOCHECK_VALUE = "no-check";
 
 /**
- * Optional shape on the client config used to gate verbose logging.
- * Set from main.ts when constructing the client.
+ * Plugin-owned client options layered on confluence.js's own Config. Set from
+ * main.ts when constructing the client.
  */
 export interface VerbosityConfig {
 	debugLogging?: boolean;
+	/** How LaTeX is rendered into storage format (F10). */
+	latexRendering?: LatexRendering;
+	/** Maximum retries per request on 429/5xx/network errors (F9). 0 = off. */
+	retryMax?: number;
+	/** Base backoff in milliseconds; doubled each attempt (F9). */
+	retryBaseMs?: number;
+	/** Per-request timeout in milliseconds (F9). 0 = no timeout. */
+	requestTimeoutMs?: number;
+}
+
+/** Thrown when a request exceeded `requestTimeoutMs`. */
+export class RequestTimeoutError extends Error {
+	constructor(ms: number) {
+		super(`Request timed out after ${ms}ms`);
+		Object.setPrototypeOf(this, RequestTimeoutError.prototype);
+	}
 }
 
 export class MyBaseClient implements Client {
@@ -102,6 +119,69 @@ export class MyBaseClient implements Client {
 			);
 	}
 
+	/** Sleep helper kept on the instance so tests can stub it out. */
+	protected async wait(ms: number): Promise<void> {
+		if (ms <= 0) return;
+		await new Promise((resolve) => setTimeout(resolve, ms));
+	}
+
+	/**
+	 * Perform the transport call with a bounded retry on rate limits, transient
+	 * gateway failures and network errors, plus a per-request timeout.
+	 *
+	 * `requestUrl` has no cancellation, so the timeout abandons the promise
+	 * rather than aborting the socket: the request may still complete
+	 * server-side, which is why an attachment upload is never retried after a
+	 * 5xx (see retry.ts).
+	 */
+	protected async sendWithRetry(finalConfig: any, original: RequestConfig): Promise<any> {
+		const retryMax = this.config.retryMax ?? 0;
+		const retryBaseMs = this.config.retryBaseMs ?? 1000;
+		const timeoutMs = this.config.requestTimeoutMs ?? 0;
+		const method = String(finalConfig.method ?? "GET");
+		const url = original.url ?? "";
+
+		return runWithRetry<any>({
+			retryMax,
+			retryBaseMs,
+			url,
+			method,
+			wait: (ms) => this.wait(ms),
+			attempt: async () => {
+				try {
+					const response =
+						timeoutMs > 0 ? await this.withTimeout(requestUrl(finalConfig), timeoutMs) : await requestUrl(finalConfig);
+					return {
+						response,
+						status: response?.status,
+						retryAfterMs: parseRetryAfter(response?.headers?.["retry-after"] ?? response?.headers?.["Retry-After"]),
+					};
+				} catch (e) {
+					return { error: e };
+				}
+			},
+			onRetry: ({ attempt, delay, status, error }) => {
+				console.warn(
+					`[Confluence API] ${method} ${url} ${error !== undefined ? "failed" : `returned ${status}`} — retrying in ${delay}ms (attempt ${attempt + 1}/${retryMax})`,
+				);
+			},
+		});
+	}
+
+	private async withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		try {
+			return await Promise.race([
+				promise,
+				new Promise<never>((_resolve, reject) => {
+					timer = setTimeout(() => reject(new RequestTimeoutError(ms)), ms);
+				}),
+			]);
+		} finally {
+			if (timer !== undefined) clearTimeout(timer);
+		}
+	}
+
 	async sendRequest<T>(
 		requestConfig: RequestConfig,
 		callback: never,
@@ -159,7 +239,9 @@ export class MyBaseClient implements Client {
 							this.debug(`[Confluence API] ADF contains ${mediaNodes.length} media node(s):`, mediaNodes.join(", "));
 						}
 					}
-					const storageValue = convertAdfToStorageFormat(adfJson, this.attachmentFileMap);
+					const storageValue = convertAdfToStorageFormat(adfJson, this.attachmentFileMap, {
+						latexRendering: this.config.latexRendering,
+					});
 					requestConfig.data = {
 						...requestConfig.data,
 						body: {
@@ -178,6 +260,20 @@ export class MyBaseClient implements Client {
 						`Local ADF-to-storage conversion failed; refusing an unsupported Data Center write: ${detail}`,
 					);
 				}
+			}
+
+			// Confluence Data Center applies only the LAST ancestor on an update,
+			// and sending a full root-first chain has been observed to make it
+			// ignore the field entirely. Send just the direct parent (F13); the
+			// move pass in StructuredPublisher remains the corrective step.
+			if (
+				requestMethod === "PUT" &&
+				requestConfig.url?.match(/^\/api\/content\/[^/]+\/?$/) &&
+				Array.isArray(requestConfig.data?.ancestors) &&
+				requestConfig.data.ancestors.length > 1
+			) {
+				const ancestors = requestConfig.data.ancestors;
+				requestConfig.data = { ...requestConfig.data, ancestors: [ancestors[ancestors.length - 1]] };
 			}
 
 			// Data Center does not support PUT on /child/attachment (returns 405).
@@ -250,7 +346,7 @@ export class MyBaseClient implements Client {
 				this.debug(`[Confluence API] Request body: ${bodyPreview}`);
 			}
 
-			const response = await requestUrl(modifiedRequestConfig);
+			const response = await this.sendWithRetry(modifiedRequestConfig, requestConfig);
 
 			this.debug(`[Confluence API] Response: ${response.status} (${response.text?.length ?? 0} chars)`);
 

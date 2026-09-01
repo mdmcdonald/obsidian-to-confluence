@@ -1,4 +1,4 @@
-import { Plugin, Notice, MarkdownView, Workspace } from "obsidian";
+import { Plugin, Notice, MarkdownView, Workspace, TFile, normalizePath } from "obsidian";
 import {
 	ConfluenceUploadSettings,
 	Publisher,
@@ -12,10 +12,17 @@ import ObsidianAdaptor from "./adaptors/obsidian";
 import { PublishRecord, detectOrphans, exceedsRemovalCap } from "./publishState";
 import { CompletedModal } from "./CompletedModal";
 import { ObsidianConfluenceClient } from "./MyBaseClient";
-import { StructuredPublisher } from "./StructuredPublisher";
+import { StructuredPublisher, ROOT_MANAGED_PROPERTY, mayWriteRootLanding } from "./StructuredPublisher";
 import { DataCenterSettingsLoader } from "./DataCenterSettingsLoader";
-import { isPathInFolder } from "./folderTree";
+import { isPathInFolder, type ChildrenMacroMode } from "./folderTree";
 import { DeletedNoteAction, FailedFile, OrphanSummary, UploadResults } from "./publishResults";
+import { LinkDiagnostic, summariseDiagnostics } from "./linkDiagnostics";
+import { DEFAULT_NAVIGATION_SETTINGS, type AdaptorNavigationSettings } from "./adaptors/obsidian";
+import type { ConsumeFirstHeading, TitleSource } from "./titleResolution";
+import type { AssetLinkMode } from "./attachments";
+import type { LatexRendering } from "./AdfToStorageFormat";
+import type { TaxonomyLabelField } from "./taxonomyLabels";
+import { formatDryRunReport, type DryRunInput, type DryRunResult } from "./dryRun";
 import {
 	ConfluencePerPageForm,
 	ConfluencePerPageUIValues,
@@ -52,6 +59,47 @@ export interface ObsidianPluginSettings extends ConfluenceUploadSettings.Conflue
 	 * skip-unchanged and deletion detection. Keyed by vault path.
 	 */
 	publishedPages: Record<string, PublishRecord>;
+	// -- Navigation publishing (see docs/navigation-publishing-spec.md) ------
+	/** Where a page's title comes from before `connie-title` overrides it. */
+	titleSource: TitleSource;
+	/** Whether the body's first heading is removed once it became the title. */
+	consumeFirstHeading: ConsumeFirstHeading;
+	/** Folder pages titled by their landing file, or by the folder name. */
+	folderTitleSource: "segment" | "landing";
+	/** Folder path (or basename) → the title its page should carry. */
+	folderDisplayNames: Record<string, string>;
+	/** Glob patterns excluded from the publish set, one per line in settings. */
+	excludeGlobs: string[];
+	/** Vault-relative YAML/text file holding more exclusion patterns. */
+	excludeListFile: string;
+	/** How a relative link to a non-markdown file is published. */
+	assetLinkMode: AssetLinkMode;
+	/** Base URL used by assetLinkMode "base-url". */
+	assetLinkBaseUrl: string;
+	/** File extensions treated as linkable assets. */
+	assetLinkExtensions: string[];
+	/** Which frontmatter fields feed the Confluence label set. */
+	labelSources: Record<TaxonomyLabelField, boolean>;
+	/** Vault-relative YAML vocabulary; labels outside it are dropped. */
+	labelAllowlistFile: string;
+	/** Per-source label prefixes, e.g. { type: "type-" }. */
+	labelPrefixes: Record<string, string>;
+	/** Maximum labels applied per page (0 = uncapped). */
+	labelMaxPerPage: number;
+	/** Publish the root folder's landing file into the configured parent page. */
+	publishRootLanding: boolean;
+	/** Children Display macro policy for folder pages. */
+	childrenMacro: ChildrenMacroMode;
+	/** Vault path the "Check Confluence links and titles" report is written to. */
+	dryRunReportPath: string;
+	/** LaTeX rendering strategy (Appfire macros, or a readable code fallback). */
+	latexRendering: LatexRendering;
+	/** Maximum retries per API request on 429 / 5xx / network errors. */
+	retryMax: number;
+	/** Base retry backoff in milliseconds (doubled each attempt). */
+	retryBaseMs: number;
+	/** Per-request timeout in milliseconds (0 = no timeout). */
+	requestTimeoutMs: number;
 	/** Epoch ms of last publish completion. Status-bar uses for "X min ago". */
 	lastPublishedAt?: number;
 	lastPublishSucceeded?: number;
@@ -106,6 +154,10 @@ export default class ConfluencePlugin extends Plugin {
 
 			authentication: authentication as any,
 			debugLogging: this.settings.debugLogging,
+			latexRendering: this.settings.latexRendering ?? "appfire",
+			retryMax: this.settings.retryMax ?? 3,
+			retryBaseMs: this.settings.retryBaseMs ?? 1000,
+			requestTimeoutMs: this.settings.requestTimeoutMs ?? 60000,
 			middlewares: {
 				onError(e) {
 					console.error("Confluence API Error:", e);
@@ -137,6 +189,7 @@ export default class ConfluencePlugin extends Plugin {
 		this.adaptor.showMetadataPanel = this.settings.showMetadataPanel;
 		this.adaptor.mapTaxonomyToLabels = this.settings.mapTaxonomyToLabels;
 		this.adaptor.preserveFolderStructure = this.settings.preserveFolderStructure;
+		this.adaptor.nav = this.navigationSettings();
 
 		const quality = this.settings.mermaidQuality || "high";
 		const mermaidRenderer = new MermaidElectronPNGRenderer(quality, this);
@@ -158,6 +211,115 @@ export default class ConfluencePlugin extends Plugin {
 		this.publisher = this.settings.preserveFolderStructure
 			? new StructuredPublisher(this.adaptor, settingsLoader, confluenceClient, [mermaidPlugin])
 			: new Publisher(this.adaptor, settingsLoader, confluenceClient, [mermaidPlugin]);
+	}
+
+	/** The navigation/publishing subset of settings the adaptor needs. */
+	private navigationSettings(): AdaptorNavigationSettings {
+		const s = this.settings;
+		return {
+			titleSource: s.titleSource ?? DEFAULT_NAVIGATION_SETTINGS.titleSource,
+			consumeFirstHeading: s.consumeFirstHeading ?? DEFAULT_NAVIGATION_SETTINGS.consumeFirstHeading,
+			folderTitleSource: s.folderTitleSource ?? DEFAULT_NAVIGATION_SETTINGS.folderTitleSource,
+			folderDisplayNames: s.folderDisplayNames ?? {},
+			excludeGlobs: s.excludeGlobs ?? [],
+			excludeListFile: s.excludeListFile ?? "",
+			assetLinkMode: s.assetLinkMode ?? DEFAULT_NAVIGATION_SETTINGS.assetLinkMode,
+			assetLinkBaseUrl: s.assetLinkBaseUrl ?? "",
+			assetLinkExtensions: s.assetLinkExtensions ?? DEFAULT_NAVIGATION_SETTINGS.assetLinkExtensions,
+			labelSources: s.labelSources ?? DEFAULT_NAVIGATION_SETTINGS.labelSources,
+			labelAllowlistFile: s.labelAllowlistFile ?? "",
+			labelPrefixes: s.labelPrefixes ?? {},
+			labelMaxPerPage: s.labelMaxPerPage ?? 0,
+			publishRootLanding: s.publishRootLanding ?? false,
+			childrenMacro: s.childrenMacro ?? "off",
+			dryRunReportPath: s.dryRunReportPath ?? DEFAULT_NAVIGATION_SETTINGS.dryRunReportPath,
+		};
+	}
+
+	/**
+	 * F7 safety check, run ONCE per publish before any write: may the configured
+	 * parent page's body be replaced by the publish root's landing file?
+	 *
+	 * Permitted only when the page is empty, when the publishing account was its
+	 * last editor, or when a previous run already claimed it with the
+	 * `connie-managed-root` content property. Anything else is refused and the
+	 * landing file publishes as an ordinary child page, as it does today.
+	 */
+	private async prepareRootLanding(): Promise<LinkDiagnostic | null> {
+		this.adaptor.rootLandingAllowed = false;
+		this.adaptor.rootPageTitle = undefined;
+		if (!this.settings.publishRootLanding) return null;
+		const client = this.getConfluenceClient();
+		const id = this.settings.confluenceParentId;
+		try {
+			const parent: any = await client.content.getContentById({
+				id,
+				expand: ["body.storage", "version", "history"],
+			});
+			this.adaptor.rootPageTitle = parent?.title;
+			let hasManagedProperty = false;
+			try {
+				await (client as any).sendRequest({
+					url: `/api/content/${id}/property/${ROOT_MANAGED_PROPERTY}`,
+					method: "GET",
+				});
+				hasManagedProperty = true;
+			} catch {
+				hasManagedProperty = false; // 404 → never claimed by this plugin
+			}
+			let myAccountId: string | undefined;
+			try {
+				myAccountId = (await client.users.getCurrentUser())?.accountId;
+			} catch {
+				myAccountId = undefined;
+			}
+			const decision = mayWriteRootLanding({
+				bodyText: typeof parent?.body?.storage?.value === "string" ? parent.body.storage.value : "",
+				lastUpdatedBy: parent?.version?.by?.accountId,
+				createdBy: parent?.history?.createdBy?.accountId,
+				myAccountId,
+				hasManagedProperty,
+			});
+			if (decision.allowed) {
+				this.adaptor.rootLandingAllowed = true;
+				return null;
+			}
+			console.warn(`[Confluence] Root landing refused: ${decision.reason}`);
+			return {
+				kind: "root-landing-refused",
+				severity: "warning",
+				sourcePath: "(publish root)",
+				target: decision.reason,
+			};
+		} catch (e) {
+			console.warn("[Confluence] Could not evaluate the parent page for root-landing promotion:", e);
+			return null;
+		}
+	}
+
+	/**
+	 * Merge one batch's successful uploads into the persisted publish record and
+	 * save immediately (F9). Without this, a run interrupted at page 2,000 would
+	 * re-publish everything next time.
+	 */
+	private async checkpointBatch(successes: UploadAdfFileResult[], hashByPath: Map<string, string>): Promise<void> {
+		let changed = false;
+		for (const r of successes) {
+			const af = r.adfFile as { absoluteFilePath?: string; pageId?: string } | undefined;
+			if (!af?.absoluteFilePath || !af.pageId) continue;
+			this.settings.publishedPages[af.absoluteFilePath] = {
+				pageId: String(af.pageId),
+				hash: hashByPath.get(af.absoluteFilePath) ?? "",
+				labels: this.adaptor.getLabelsFor(af.absoluteFilePath),
+			};
+			changed = true;
+		}
+		if (!changed) return;
+		try {
+			await this.saveData(this.settings);
+		} catch (e) {
+			console.warn("[Confluence] Could not checkpoint publish state after a batch:", e);
+		}
 	}
 
 	/**
@@ -213,6 +375,105 @@ export default class ConfluencePlugin extends Plugin {
 		}
 	}
 
+	/**
+	 * F6 — "Check Confluence links and titles".
+	 *
+	 * Runs the whole publish pipeline up to but not including the network:
+	 * resolves the publish set, every page and folder title, and every link,
+	 * then writes what it found into one markdown note in the vault. Nothing is
+	 * uploaded, no frontmatter is written, and no Confluence credentials are
+	 * needed — this is the pass an author works through before a bulk publish.
+	 *
+	 * Exposed as a plugin method (not just a command) so a harness can drive it.
+	 */
+	async runDryRun(): Promise<DryRunResult> {
+		this.adaptor.nav = this.navigationSettings();
+		// Root-landing promotion needs the network to decide, and the dry run is
+		// deliberately offline, so report the intent rather than probing.
+		this.adaptor.rootLandingAllowed = false;
+		this.adaptor.rootPageTitle = undefined;
+
+		await this.adaptor.computePublishContext(this.settings.deduplicateTitles);
+		const paths = await this.adaptor.getAllPublishableFilePaths();
+
+		// Rendering each page is what produces the link diagnostics, the derived
+		// label set and the attachment list; a page that fails to render is a
+		// finding in its own right rather than a reason to abandon the report.
+		for (const path of paths) {
+			try {
+				await this.adaptor.loadMarkdownFile(path);
+			} catch (e) {
+				console.warn(`[Confluence] Dry run could not render ${path}:`, e);
+			}
+		}
+
+		const folderTitles = this.adaptor.getFolderTitles();
+		const exclusions = this.adaptor.getExclusionCounts();
+		const derived = this.adaptor.getAllDerivedLabels();
+		const dropped = this.adaptor.getDroppedLabelCounts();
+
+		const input: DryRunInput = {
+			folderToPublish: this.settings.folderToPublish || "(vault root)",
+			generatedAt: new Date().toISOString(),
+			counts: {
+				publishablePages: paths.length,
+				folderPages: folderTitles.length,
+				excludedByGlob: exclusions.glob,
+				excludedByFrontmatter: exclusions.frontmatter,
+			},
+			renames: this.adaptor.getTitleRenames().map((r) => ({
+				filePath: r.filePath,
+				originalTitle: r.originalTitle,
+				renamedTitle: r.renamedTitle,
+			})),
+			landingConflicts: this.adaptor.getLandingConflicts(),
+			folderTitles,
+			diagnostics: this.adaptor.getDiagnostics(),
+			labels: {
+				distinct: derived.size,
+				dropped: [...dropped.entries()]
+					.map(([label, count]) => ({ label, count }))
+					.sort((a, b) => b.count - a.count || a.label.localeCompare(b.label)),
+				top: [...derived.entries()]
+					.map(([label, count]) => ({ label, count }))
+					.sort((a, b) => b.count - a.count || a.label.localeCompare(b.label))
+					.slice(0, 30),
+			},
+		};
+
+		const report = formatDryRunReport(input);
+		const reportPath = await this.writeDryRunReport(report);
+		return { ...input, report, reportPath };
+	}
+
+	/**
+	 * Write the dry-run report into the vault and open it. Returns the path it
+	 * landed at, or "" when the write failed — a report we could not save is
+	 * still returned in memory rather than lost.
+	 */
+	private async writeDryRunReport(report: string): Promise<string> {
+		const path = normalizePath((this.settings.dryRunReportPath || "").trim() || "_confluence-check.md");
+		try {
+			const existing = this.app.vault.getAbstractFileByPath(path);
+			if (existing instanceof TFile) {
+				await this.app.vault.modify(existing, report);
+			} else {
+				const folder = path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
+				if (folder && !this.app.vault.getAbstractFileByPath(folder)) {
+					await this.app.vault.createFolder(folder);
+				}
+				await this.app.vault.create(path, report);
+			}
+			const file = this.app.vault.getAbstractFileByPath(path);
+			if (file instanceof TFile) await this.app.workspace.getLeaf(true).openFile(file);
+			return path;
+		} catch (e) {
+			console.error("[Confluence] Could not write the dry-run report:", e);
+			new Notice(`Confluence check: could not write ${path} — see the console.`);
+			return "";
+		}
+	}
+
 	async doPublish(publishFilter?: string, force = false): Promise<UploadResults> {
 		const fullPublish = !publishFilter;
 		console.log(`[Confluence] === Publish start (filter: ${publishFilter ?? "(all)"}${force ? ", force" : ""}) ===`);
@@ -224,7 +485,17 @@ export default class ConfluencePlugin extends Plugin {
 		// publishable file — needed both to resolve [[wikilinks]] to the right
 		// page title and to rename any titles that would collide (the latter
 		// only when the deduplicateTitles setting is on).
+		this.adaptor.nav = this.navigationSettings();
+		const rootDiagnostic = await this.prepareRootLanding();
 		await this.adaptor.computePublishContext(this.settings.deduplicateTitles);
+
+		// F8: tell the publisher which labels IT applied last time, so a republish
+		// only ever removes plugin-owned labels and restores anyone else's.
+		if (this.publisher instanceof StructuredPublisher) {
+			this.publisher.previousOwnedLabels = new Map(
+				Object.entries(this.settings.publishedPages).map(([path, rec]) => [path, rec.labels ?? []]),
+			);
+		}
 
 		const aggregate: UploadResults = {
 			errorMessage: null,
@@ -290,6 +561,7 @@ export default class ConfluencePlugin extends Plugin {
 					const { successes, failures } = await this.publishBatch(batches[i]);
 					aggregate.filesUploadResult.push(...successes);
 					aggregate.failedFiles.push(...failures);
+					await this.checkpointBatch(successes, hashByPath);
 				} catch (err) {
 					const reason = extractErrorMessage(err);
 					console.error(`[Confluence] Batch ${i + 1} threw:`, err);
@@ -315,6 +587,10 @@ export default class ConfluencePlugin extends Plugin {
 				console.error("[Confluence] Publish-state reconciliation failed:", e);
 			}
 		} finally {
+			const diagnostics = this.adaptor.getDiagnostics();
+			if (rootDiagnostic) diagnostics.push(rootDiagnostic);
+			aggregate.diagnostics = diagnostics;
+			aggregate.diagnosticSummary = summariseDiagnostics(diagnostics);
 			const orph = aggregate.orphansHandled;
 			const orphMsg = orph && orph.ok ? `  ${orph.action === "trash" ? "🗑" : "📦"}${orph.ok}` : "";
 			notice.setMessage(
@@ -365,7 +641,15 @@ export default class ConfluencePlugin extends Plugin {
 		// the file republishes until a real hash is captured.
 		for (const path of publishPaths) {
 			const pageId = pageIdByPath.get(path);
-			if (pageId) next[path] = { pageId, hash: hashByPath.get(path) ?? "" };
+			if (pageId) {
+				next[path] = {
+					pageId,
+					hash: hashByPath.get(path) ?? "",
+					// Remember exactly which labels the plugin applied, so the next
+					// publish can remove only its own (F8).
+					labels: this.adaptor.getLabelsFor(path),
+				};
+			}
 		}
 
 		let orphansHandled: OrphanSummary | null = null;
@@ -669,6 +953,43 @@ export default class ConfluencePlugin extends Plugin {
 		});
 
 		this.addCommand({
+			id: "check-links",
+			name: "Check Confluence links and titles (dry run)",
+			checkCallback: (checking: boolean) => {
+				if (this.isSyncing) return false;
+				if (checking) return true;
+				this.isSyncing = true;
+				const notice = new Notice("Checking Confluence links and titles…", 0);
+				this.runDryRun()
+					.then((result) => {
+						const errors = result.diagnostics.filter((d) => d.severity === "error").length;
+						const warnings = result.diagnostics.length - errors;
+						notice.setMessage(
+							`Confluence check done — ${result.counts.publishablePages} page(s), ` +
+								`${result.renames.length} rename(s), ✗${errors} ⚠${warnings}`,
+						);
+						setTimeout(() => notice.hide(), 5000);
+					})
+					.catch((error) => {
+						notice.hide();
+						console.error("[Confluence] Link/title check failed:", error);
+						new CompletedModal(this.app, {
+							uploadResults: {
+								errorMessage: extractErrorMessage(error),
+								failedFiles: [],
+								filesUploadResult: [],
+								renamedFiles: [],
+							},
+						}).open();
+					})
+					.finally(() => {
+						this.isSyncing = false;
+					});
+				return true;
+			},
+		});
+
+		this.addCommand({
 			id: "force-publish-all",
 			name: "Force republish all to Confluence (ignore unchanged)",
 			checkCallback: (checking: boolean) => {
@@ -815,6 +1136,11 @@ export default class ConfluencePlugin extends Plugin {
 				onDeletedNote: "off" as DeletedNoteAction,
 				maxDeletePerPublish: 25,
 				publishedPages: {},
+				...DEFAULT_NAVIGATION_SETTINGS,
+				latexRendering: "appfire" as LatexRendering,
+				retryMax: 3,
+				retryBaseMs: 1000,
+				requestTimeoutMs: 60000,
 			},
 			await this.loadData(),
 		);

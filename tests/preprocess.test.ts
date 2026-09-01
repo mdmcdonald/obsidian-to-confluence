@@ -14,6 +14,7 @@ import {
 	decodeMetadataBlock,
 	WikilinkResolution,
 } from "../src/obsidianPreprocess";
+import type { LinkDiagnostic } from "../src/linkDiagnostics";
 import { convertAdfToStorageFormat } from "../src/AdfToStorageFormat";
 
 // ---------------------------------------------------------------------------
@@ -782,4 +783,279 @@ test("integration: a wikilink inside a comment is removed, not linked", () => {
 	});
 	assert.equal(md, "keep  end");
 	assert.deepEqual(calls, [], "resolver not called for commented-out link");
+});
+
+// ---------------------------------------------------------------------------
+// F4a — ambiguous stems
+//
+// Stem disambiguation itself lives in the adaptor (it needs the vault index);
+// what the preprocessor must guarantee is that whatever the resolver decides
+// is what gets published, and that an unresolved case still yields a link.
+// ---------------------------------------------------------------------------
+
+test("a wikilink publishes the title the resolver chose, path and all", () => {
+	const md = preprocessWikilinks("see [[domain/radar/Overview]]", {
+		resolve: (t) => (t === "domain/radar/Overview" ? publishable("Radar Overview") : { inVault: false, publishable: false }),
+	});
+	assert.deepEqual(decodeSentinel(md.replace("see ", "")), {
+		kind: "page",
+		title: "Radar Overview",
+		display: "domain/radar/Overview",
+	});
+});
+
+test("an ambiguity the adaptor resolved still produces a real page link", () => {
+	// The adaptor picked the one publishable candidate and reported
+	// ambiguous-stem-resolved; the preprocessor just links it.
+	const diagnostics: LinkDiagnostic[] = [];
+	const md = preprocessWikilinks("[[Overview]]", {
+		resolve: () => publishable("Radar Overview"),
+		sourcePath: "a.md",
+		onDiagnostic: (d) => diagnostics.push(d),
+	});
+	assert.equal(decodeSentinel(md)?.title, "Radar Overview");
+	// The preprocessor adds no diagnostic of its own for a resolved link.
+	assert.deepEqual(diagnostics, []);
+});
+
+test("an excluded target is reported as excluded, not as unpublished", () => {
+	const diagnostics: LinkDiagnostic[] = [];
+	const out = preprocessWikilinks("[[Draft]]", {
+		resolve: () => ({ inVault: true, publishable: false, excluded: true }),
+		sourcePath: "a.md",
+		onDiagnostic: (d) => diagnostics.push(d),
+	});
+	assert.equal(out, "Draft");
+	assert.deepEqual(
+		diagnostics.map((d) => d.kind),
+		["target-excluded"],
+	);
+});
+
+// ---------------------------------------------------------------------------
+// F4b — folder links
+// ---------------------------------------------------------------------------
+
+test("a folder link resolves to the folder page title", () => {
+	const md = preprocessMarkdownLinks("see [Radar](../radar/)", {
+		resolve: () => ({ inVault: false, publishable: false }),
+		resolveFolder: (t) => (t === "../radar/" ? { kind: "page", title: "Radar" } : { kind: "not-a-folder" }),
+	});
+	assert.deepEqual(decodeSentinel(md.replace("see ", "")), {
+		kind: "page",
+		title: "Radar",
+		display: "Radar",
+	});
+});
+
+test("an extensionless folder link resolves without a trailing slash", () => {
+	const md = preprocessMarkdownLinks("[Nodes](../04_Nodes)", {
+		resolve: () => ({ inVault: false, publishable: false }),
+		resolveFolder: () => ({ kind: "page", title: "Node catalogue" }),
+	});
+	assert.equal(decodeSentinel(md)?.title, "Node catalogue");
+});
+
+test("a folder whose files are all excluded falls back to plain text", () => {
+	const diagnostics: LinkDiagnostic[] = [];
+	const out = preprocessMarkdownLinks("see [Drafts](../drafts/)", {
+		resolve: () => ({ inVault: false, publishable: false }),
+		resolveFolder: () => ({ kind: "not-published" }),
+		sourcePath: "a.md",
+		onDiagnostic: (d) => diagnostics.push(d),
+	});
+	assert.equal(out, "see Drafts");
+	assert.deepEqual(
+		diagnostics.map((d) => d.kind),
+		["folder-not-published"],
+	);
+});
+
+test("a target that is not a folder falls through to the asset check", () => {
+	const md = preprocessMarkdownLinks("[Script](run.py)", {
+		resolve: () => ({ inVault: false, publishable: false }),
+		resolveFolder: () => ({ kind: "not-a-folder" }),
+		resolveAsset: () => ({ kind: "attachment", filename: "run.py" }),
+	});
+	assert.equal(decodeSentinel(md)?.kind, "attachment");
+});
+
+// ---------------------------------------------------------------------------
+// F4c — asset links, in all three modes
+// ---------------------------------------------------------------------------
+
+test('asset mode "attach" emits an attachment sentinel carrying the filename', () => {
+	const md = preprocessMarkdownLinks("[the script](scripts/run.py)", {
+		resolve: () => ({ inVault: false, publishable: false }),
+		resolveAsset: () => ({ kind: "attachment", filename: "run.py" }),
+	});
+	assert.deepEqual(decodeSentinel(md), {
+		kind: "attachment",
+		filename: "run.py",
+		display: "the script",
+	});
+});
+
+test('asset mode "base-url" rewrites the href and keeps the link text', () => {
+	const md = preprocessMarkdownLinks("[the script](scripts/run.py)", {
+		resolve: () => ({ inVault: false, publishable: false }),
+		resolveAsset: () => ({ kind: "url", href: "https://git.example.com/vault/-/blob/main/scripts/run.py" }),
+	});
+	assert.equal(md, "[the script](https://git.example.com/vault/-/blob/main/scripts/run.py)");
+});
+
+test('asset mode "text" drops the link and reports it', () => {
+	const diagnostics: LinkDiagnostic[] = [];
+	const md = preprocessMarkdownLinks("run [the script](scripts/run.py) first", {
+		resolve: () => ({ inVault: false, publishable: false }),
+		resolveAsset: () => ({ kind: "text" }),
+		sourcePath: "a.md",
+		onDiagnostic: (d) => diagnostics.push(d),
+	});
+	assert.equal(md, "run the script first");
+	assert.deepEqual(
+		diagnostics.map((d) => d.kind),
+		["asset-link-dropped"],
+	);
+});
+
+test("a file the asset policy does not handle is left exactly as written", () => {
+	const src = "[thing](weird.xyz)";
+	assert.equal(
+		preprocessMarkdownLinks(src, {
+			resolve: () => ({ inVault: false, publishable: false }),
+			resolveAsset: () => ({ kind: "not-an-asset" }),
+		}),
+		src,
+	);
+});
+
+test("an attachment sentinel renders as an ri:attachment link", () => {
+	const storage = para({
+		type: "text",
+		text: encodeWikilink({ kind: "attachment", filename: "run.py", display: "the script" }).replace(/`/g, ""),
+		marks: [{ type: "code" }],
+	});
+	assert.ok(storage.includes('<ri:attachment ri:filename="run.py" />'), storage);
+	assert.ok(storage.includes("<ac:plain-text-link-body><![CDATA[the script]]></ac:plain-text-link-body>"), storage);
+	// An attachment link never carries a page reference.
+	assert.equal(storage.includes("ri:page"), false);
+});
+
+test("an attachment filename with XML-special characters is escaped", () => {
+	const storage = para({
+		type: "text",
+		text: encodeWikilink({ kind: "attachment", filename: 'a&b"c.py', display: "x" }).replace(/`/g, ""),
+		marks: [{ type: "code" }],
+	});
+	assert.ok(storage.includes("&amp;"), storage);
+	assert.equal(storage.includes('filename="a&b"c.py"'), false);
+});
+
+// ---------------------------------------------------------------------------
+// F4d — site-absolute paths
+// ---------------------------------------------------------------------------
+
+test("an absolute site path resolves to a page link", () => {
+	const md = preprocessMarkdownLinks("[Radar](/domain/radar/index.md)", {
+		resolve: () => ({ inVault: false, publishable: false }),
+		resolveAbsolute: (t) => (t === "/domain/radar/index.md" ? publishable("Radar") : { inVault: false, publishable: false }),
+	});
+	assert.equal(decodeSentinel(md)?.title, "Radar");
+});
+
+test("an absolute path that does not resolve degrades to text and is reported", () => {
+	const diagnostics: LinkDiagnostic[] = [];
+	const md = preprocessMarkdownLinks("[Gone](/domain/gone.md)", {
+		resolve: () => ({ inVault: false, publishable: false }),
+		resolveAbsolute: () => ({ inVault: false, publishable: false }),
+		sourcePath: "a.md",
+		onDiagnostic: (d) => diagnostics.push(d),
+	});
+	assert.equal(md, "Gone");
+	assert.deepEqual(
+		diagnostics.map((d) => d.kind),
+		["absolute-link-unresolved"],
+	);
+});
+
+test("a protocol-relative or scheme URL is never treated as a vault path", () => {
+	for (const url of ["//cdn.example.com/x.png", "https://example.com/a.md", "mailto:a@b.c"]) {
+		const src = `[x](${url})`;
+		assert.equal(
+			preprocessMarkdownLinks(src, {
+				resolve: () => ({ inVault: false, publishable: false }),
+				resolveAbsolute: () => publishable("Should Not Be Used"),
+				resolveFolder: () => ({ kind: "page", title: "Should Not Be Used" }),
+			}),
+			src,
+			url,
+		);
+	}
+});
+
+test("an absolute path is left alone when no absolute resolver is supplied", () => {
+	const src = "[x](/a/b.md)";
+	assert.equal(preprocessMarkdownLinks(src, { resolve: () => ({ inVault: false, publishable: false }) }), src);
+});
+
+// ---------------------------------------------------------------------------
+// F10 — LaTeX fallback rendering
+// ---------------------------------------------------------------------------
+
+/** Convert an ADF doc under a chosen LaTeX strategy. */
+function latexStorage(adf: unknown, latexRendering: "appfire" | "fallback"): string {
+	return convertAdfToStorageFormat(adf as never, undefined, { latexRendering });
+}
+
+const blockMathAdf = {
+	type: "doc",
+	content: [{ type: "codeBlock", attrs: { language: "latex-math-block" }, content: [{ type: "text", text: "E = mc^2" }] }],
+};
+const inlineMathAdf = {
+	type: "doc",
+	content: [
+		{
+			type: "paragraph",
+			content: [{ type: "text", text: "latex-math-inline:x^2", marks: [{ type: "code" }] }],
+		},
+	],
+};
+
+test("block maths renders as the Appfire mathblock macro by default", () => {
+	const storage = latexStorage(blockMathAdf, "appfire");
+	assert.ok(storage.includes('ac:name="mathblock"'), storage);
+	assert.ok(storage.includes("E = mc^2"), storage);
+});
+
+test("block maths renders as a latex code macro under the fallback", () => {
+	const storage = latexStorage(blockMathAdf, "fallback");
+	assert.ok(storage.includes('ac:name="code"'), storage);
+	assert.ok(storage.includes('<ac:parameter ac:name="language">latex</ac:parameter>'), storage);
+	assert.ok(storage.includes("<![CDATA[E = mc^2]]>"), storage);
+	assert.equal(storage.includes("mathblock"), false);
+});
+
+test("inline maths renders as the Appfire mathinline macro by default", () => {
+	const storage = latexStorage(inlineMathAdf, "appfire");
+	assert.ok(storage.includes('ac:name="mathinline"'), storage);
+	assert.ok(storage.includes("x^2"), storage);
+});
+
+test("inline maths renders as plain code under the fallback", () => {
+	const storage = latexStorage(inlineMathAdf, "fallback");
+	assert.ok(storage.includes("<code>x^2</code>"), storage);
+	assert.equal(storage.includes("mathinline"), false);
+});
+
+test("the LaTeX strategy does not leak between conversions", () => {
+	latexStorage(blockMathAdf, "fallback");
+	// A conversion with no options must be back on the Appfire default.
+	assert.ok(convertAdfToStorageFormat(blockMathAdf as never).includes("mathblock"));
+});
+
+test("the preprocessor emits the sentinels the fallback renderer consumes", () => {
+	const md = preprocessLatex("Given $x^2$ then:\n\n$$E = mc^2$$\n");
+	assert.match(md, /`latex-math-inline:x\^2`/);
+	assert.match(md, /```latex-math-block\nE = mc\^2\n```/);
 });

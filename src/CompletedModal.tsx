@@ -2,6 +2,12 @@ import { Modal, App } from "obsidian";
 import { createRoot, Root } from "react-dom/client";
 import React, { useState } from "react";
 import type { UploadResults } from "./publishResults";
+import {
+	DIAGNOSTIC_LABEL,
+	LINK_DIAGNOSTIC_KINDS,
+	rankPagesByDiagnostics,
+	summariseDiagnostics,
+} from "./linkDiagnostics";
 
 export interface UploadResultsProps {
 	uploadResults: UploadResults;
@@ -11,6 +17,14 @@ const CompletedView: React.FC<UploadResultsProps> = ({ uploadResults }) => {
 	const { errorMessage, failedFiles, filesUploadResult, renamedFiles, skipped, orphansHandled } = uploadResults;
 	const [expanded, setExpanded] = useState(false);
 	const [renamesExpanded, setRenamesExpanded] = useState(false);
+	const [openPage, setOpenPage] = useState<string | null>(null);
+
+	// F5 — link/title problems found while rendering. These never fail a publish;
+	// they are a to-do list, and the dry run is where they are meant to be fixed.
+	const diagnostics = uploadResults.diagnostics ?? [];
+	const diagnosticSummary = uploadResults.diagnosticSummary ?? summariseDiagnostics(diagnostics);
+	const worstPages = rankPagesByDiagnostics(diagnostics).slice(0, 10);
+	const diagnosticErrors = diagnostics.filter((d) => d.severity === "error").length;
 
 	const countResults = {
 		content: { same: 0, updated: 0 },
@@ -143,6 +157,62 @@ const CompletedView: React.FC<UploadResultsProps> = ({ uploadResults }) => {
 							<p style={{ fontSize: "12px", opacity: 0.7, fontFamily: "monospace" }}>
 								Page IDs: {orphansHandled.ids.join(", ")}
 							</p>
+						</div>
+					)}
+
+					{diagnostics.length > 0 && (
+						<div
+							className="link-diagnostics"
+							style={{
+								border: "1px solid #9b59b6",
+								padding: "12px",
+								borderRadius: "4px",
+								marginBottom: "12px",
+								backgroundColor: "rgba(155, 89, 182, 0.08)",
+							}}
+						>
+							<h3 style={{ color: "#9b59b6", marginTop: 0 }}>
+								{diagnostics.length} link/title issue(s) — {diagnosticErrors} error(s)
+							</h3>
+							<p style={{ fontSize: "12px", marginBottom: "8px", opacity: 0.8 }}>
+								These did not fail the publish. Run "Check Confluence links and titles" for the full report.
+							</p>
+							<table className="result-table" style={{ fontSize: "12px", marginBottom: "8px" }}>
+								<tbody>
+									{LINK_DIAGNOSTIC_KINDS.filter((kind) => (diagnosticSummary[kind] ?? 0) > 0).map((kind) => (
+										<tr key={kind}>
+											<td>{DIAGNOSTIC_LABEL[kind]}</td>
+											<td style={{ textAlign: "right" }}>{diagnosticSummary[kind]}</td>
+										</tr>
+									))}
+								</tbody>
+							</table>
+							<ul style={{ listStyle: "none", padding: 0, fontSize: "12px" }}>
+								{worstPages.map((page) => (
+									<li key={page.sourcePath} style={{ marginBottom: "4px" }}>
+										<button
+											onClick={() => setOpenPage(openPage === page.sourcePath ? null : page.sourcePath)}
+											style={{ fontFamily: "monospace", textAlign: "left", width: "100%" }}
+										>
+											{openPage === page.sourcePath ? "▾" : "▸"} {page.sourcePath || "(unknown page)"} — ✗{page.errors}{" "}
+											⚠{page.warnings}
+										</button>
+										{openPage === page.sourcePath && (
+											<ul style={{ listStyle: "none", padding: "4px 0 4px 16px", fontFamily: "monospace" }}>
+												{page.diagnostics.map((d, index) => (
+													<li key={index} style={{ marginBottom: "2px" }}>
+														<span style={{ color: d.severity === "error" ? "#e74c3c" : "#f39c12" }}>
+															{d.severity === "error" ? "✗" : "⚠"}
+														</span>{" "}
+														{DIAGNOSTIC_LABEL[d.kind]}: {d.target}
+														{d.display && d.display !== d.target ? ` (${d.display})` : ""}
+													</li>
+												))}
+											</ul>
+										)}
+									</li>
+								))}
+							</ul>
 						</div>
 					)}
 

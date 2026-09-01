@@ -4,17 +4,68 @@
  * The stock `Publisher.publish()` builds its page tree from
  * `createFolderStructure(files)` — which collapses the folder hierarchy when it
  * sees a batched/filtered subset of files (see folderTree.ts for the why). This
- * override replaces only that one step with `adaptor.buildLocalAdfTree(files)`,
+ * override replaces that one step with `adaptor.buildLocalAdfTree(files)`,
  * which builds a tree against the GLOBAL structure (stable root, unique folder
- * titles). Everything else (page existence, content upload, labels) is the
- * library's unchanged machinery.
+ * titles), and adds three things the library has no concept of:
+ *
+ *   - promoting the publish root's landing file onto the configured parent page
+ *     (F7), guarded so it can never overwrite someone else's page;
+ *   - uploading non-image attachments the pages link to (F4c);
+ *   - restoring labels a human added in Confluence that the library's
+ *     replace-everything label pass would otherwise strip (F8).
+ *
+ * Everything else (page existence, content upload) is the library's unchanged
+ * machinery.
  */
 import { Publisher } from "@markdown-confluence/lib";
+import SparkMD5 from "spark-md5";
 import { ensureAllFilesExistInConfluence } from "@markdown-confluence/lib/dist/TreeConfluence.js";
 import type ObsidianAdaptor from "./adaptors/obsidian";
 import { planReparents } from "./reparent";
+import { planLabelChanges } from "./publishState";
 
 type Any = any;
+
+/** Content property marking a parent page whose body this plugin owns (F7). */
+export const ROOT_MANAGED_PROPERTY = "connie-managed-root";
+
+export interface RootLandingDecision {
+	allowed: boolean;
+	reason: string;
+}
+
+/**
+ * Whether the configured parent page may have its body replaced by the publish
+ * root's landing file. Pure so the safety rule is testable without a server.
+ *
+ * Permitted when the page is effectively empty, when the publishing account was
+ * the last editor (so we are only overwriting our own work), or when a previous
+ * run already claimed the page with the managed-root content property.
+ */
+export function mayWriteRootLanding(input: {
+	bodyText: string;
+	lastUpdatedBy: string | undefined;
+	createdBy: string | undefined;
+	myAccountId: string | undefined;
+	hasManagedProperty: boolean;
+}): RootLandingDecision {
+	if (input.hasManagedProperty) return { allowed: true, reason: "page already managed by a previous run" };
+	const stripped = input.bodyText
+		.replace(/<[^>]*>/g, "")
+		.replace(/&nbsp;/g, " ")
+		.trim();
+	if (stripped.length === 0) return { allowed: true, reason: "parent page body is empty" };
+	if (input.myAccountId && input.lastUpdatedBy && input.lastUpdatedBy === input.myAccountId) {
+		return { allowed: true, reason: "publishing account was the last editor" };
+	}
+	if (input.myAccountId && input.createdBy && input.createdBy === input.myAccountId && !input.lastUpdatedBy) {
+		return { allowed: true, reason: "publishing account created the page" };
+	}
+	return {
+		allowed: false,
+		reason: `parent page has content last edited by ${input.lastUpdatedBy ?? "another account"}`,
+	};
+}
 
 export class StructuredPublisher extends Publisher {
 	private structuredAdaptor: ObsidianAdaptor;
@@ -38,12 +89,15 @@ export class StructuredPublisher extends Publisher {
 		}
 		const parentPage = await self.confluenceClient.content.getContentById({
 			id: settings.confluenceParentId,
-			expand: ["body.atlas_doc_format", "space"],
+			expand: ["body.atlas_doc_format", "space", "version"],
 		});
 		if (!parentPage.space) {
 			throw new Error("Missing Space Key");
 		}
 		const spaceToPublishTo = parentPage.space;
+		// F7's safety check ran once for the whole publish (plugin.prepareRootLanding);
+		// the adaptor already knows the parent title and whether promotion is allowed.
+		this.structuredAdaptor.rootPageTitle = parentPage.title;
 
 		const files = await self.adaptor.getMarkdownFilesToUpload();
 		// ── the only change vs. the stock publisher ──────────────────────────
@@ -60,13 +114,31 @@ export class StructuredPublisher extends Publisher {
 			settings,
 		);
 
-		let confluencePagesToPublish = allPages;
+		// The library's flattenTree drops the root carrier (it has no ancestors),
+		// so the parent page is never written. When root promotion is on, add it
+		// back as a node that targets the parent page directly.
+		const rootNode = this.buildRootNode(folderTree, parentPage);
+		const pagesToConsider = rootNode ? [rootNode, ...allPages] : allPages;
+
+		let confluencePagesToPublish = pagesToConsider;
 		if (publishFilter) {
-			confluencePagesToPublish = allPages.filter((file: Any) => file.file.absoluteFilePath === publishFilter);
+			confluencePagesToPublish = pagesToConsider.filter((file: Any) => file.file.absoluteFilePath === publishFilter);
 		}
+
+		// Attachments must exist before the page body referencing them is written,
+		// otherwise the ri:attachment link renders as a broken placeholder.
+		await this.uploadAttachments(confluencePagesToPublish, self.confluenceClient);
+
+		const remoteLabels = await this.captureRemoteLabels(confluencePagesToPublish, self.confluenceClient);
 
 		const adrFileTasks = confluencePagesToPublish.map((file: Any) => self.publishFile(file));
 		const results = await Promise.all(adrFileTasks);
+
+		// F8: the library replaces a page's labels with `adfFile.tags`, deleting
+		// anything a human added in Confluence. Put those back.
+		await this.restoreUnownedLabels(confluencePagesToPublish, remoteLabels, self.confluenceClient);
+
+		if (rootNode) await this.markRootManaged(parentPage.id, rootNode.file.absoluteFilePath, self.confluenceClient);
 
 		// Data Center fix for the folder-under-folder bug: this DC doesn't apply the
 		// `ancestors` field reliably (observed ignored on both create AND update), so
@@ -77,6 +149,173 @@ export class StructuredPublisher extends Publisher {
 		await this.enforceParentHierarchy(allPages, self.confluenceClient);
 
 		return results;
+	}
+
+	/**
+	 * A ConfluenceNode for the configured parent page, so the library's own
+	 * publishFile writes the root landing's body into it. `ancestors` is empty
+	 * and `dontChangeParentPageId` is set, so no ancestor chain is ever sent for
+	 * the parent page and the re-parent pass leaves it alone.
+	 */
+	private buildRootNode(folderTree: Any, parentPage: Any): Any | undefined {
+		if (!this.structuredAdaptor.rootLandingAllowed) return undefined;
+		const file = folderTree?.file;
+		// A root carrier with a synthetic "__folder__/…" path means no landing
+		// file was promoted into it — nothing to write.
+		if (!file || typeof file.absoluteFilePath !== "string" || file.absoluteFilePath.startsWith("__folder__/")) {
+			return undefined;
+		}
+		return {
+			file: {
+				...file,
+				pageId: parentPage.id,
+				spaceKey: parentPage.space?.key,
+				pageUrl: "",
+				pageTitle: parentPage.title,
+				dontChangeParentPageId: true,
+			},
+			version: parentPage?.version?.number ?? 1,
+			lastUpdatedBy: parentPage?.version?.by?.accountId ?? "",
+			existingPageData: {
+				adfContent: JSON.parse(parentPage?.body?.atlas_doc_format?.value ?? "{}"),
+				pageTitle: parentPage.title,
+				ancestors: [],
+				contentType: parentPage.type ?? "page",
+			},
+			ancestors: [],
+		};
+	}
+
+	/** Record that this plugin owns the parent page's body (F7). */
+	private async markRootManaged(pageId: string, sourcePath: string, client: Any): Promise<void> {
+		const body = { key: ROOT_MANAGED_PROPERTY, value: { source: sourcePath, schema: 1 } };
+		try {
+			await client.sendRequest({
+				url: `/api/content/${pageId}/property/${ROOT_MANAGED_PROPERTY}`,
+				method: "PUT",
+				data: { ...body, version: { number: 2 } },
+			});
+		} catch {
+			try {
+				await client.sendRequest({
+					url: `/api/content/${pageId}/property`,
+					method: "POST",
+					data: body,
+				});
+			} catch (e) {
+				console.warn(`[Confluence] Could not set ${ROOT_MANAGED_PROPERTY} on page ${pageId}:`, e);
+			}
+		}
+	}
+
+	/**
+	 * Upload the non-image files each page links to (F4c). Deliberately NOT
+	 * routed through the library's image pipeline: that pipeline measures every
+	 * buffer with `image-size`, which throws on a script or a notebook and would
+	 * fail the whole page.
+	 */
+	private async uploadAttachments(nodes: Any[], client: Any): Promise<void> {
+		if (this.structuredAdaptor.nav.assetLinkMode !== "attach") return;
+		for (const node of nodes) {
+			const sourcePath: string = node?.file?.absoluteFilePath ?? "";
+			const pageId: string = node?.file?.pageId ?? "";
+			if (!sourcePath || !pageId) continue;
+			const requests = this.structuredAdaptor.getAttachmentsFor(sourcePath);
+			if (requests.length === 0) continue;
+
+			let existing: Record<string, string> = {};
+			try {
+				const current = await client.contentAttachments.getAttachments({ id: pageId });
+				existing = Object.fromEntries(
+					(current?.results ?? []).map((r: Any) => [String(r.title), String(r?.metadata?.comment ?? "")]),
+				);
+			} catch (e) {
+				console.warn(`[Confluence] Could not list attachments for page ${pageId}:`, e);
+			}
+
+			for (const request of requests) {
+				try {
+					const binary = await this.structuredAdaptor.readAttachment(request.vaultPath);
+					if (!binary) {
+						console.warn(`[Confluence] Attachment not readable: ${request.vaultPath}`);
+						continue;
+					}
+					const buffer = Buffer.from(binary.contents);
+					const hash = new SparkMD5.ArrayBuffer().append(binary.contents).end();
+					if (existing[request.filename] === hash) continue; // unchanged
+					await client.contentAttachments.createOrUpdateAttachments({
+						id: pageId,
+						attachments: [
+							{
+								file: buffer,
+								filename: request.filename,
+								minorEdit: true,
+								comment: hash,
+								contentType: binary.mimeType,
+							},
+						],
+					});
+				} catch (e) {
+					console.warn(`[Confluence] Failed to attach ${request.vaultPath} to page ${pageId}:`, e);
+				}
+			}
+		}
+	}
+
+	/** Snapshot each page's remote labels BEFORE the library rewrites them. */
+	private async captureRemoteLabels(nodes: Any[], client: Any): Promise<Map<string, string[]>> {
+		const out = new Map<string, string[]>();
+		for (const node of nodes) {
+			const pageId: string = node?.file?.pageId ?? "";
+			if (!pageId) continue;
+			try {
+				const current = await client.contentLabels.getLabelsForContent({ id: pageId });
+				out.set(
+					pageId,
+					(current?.results ?? []).map((l: Any) => String(l.label ?? l.name)),
+				);
+			} catch {
+				// A page we cannot read labels for is left alone rather than guessed at.
+			}
+		}
+		return out;
+	}
+
+	/**
+	 * Re-add every label that was on the page but is not plugin-owned. The
+	 * library's label pass removes anything outside `adfFile.tags`, which would
+	 * silently delete labels a human applied in Confluence.
+	 */
+	private async restoreUnownedLabels(nodes: Any[], remote: Map<string, string[]>, client: Any): Promise<void> {
+		for (const node of nodes) {
+			const pageId: string = node?.file?.pageId ?? "";
+			const sourcePath: string = node?.file?.absoluteFilePath ?? "";
+			if (!pageId || !sourcePath) continue;
+			const before = remote.get(pageId);
+			if (!before || before.length === 0) continue;
+			const current: string[] = Array.isArray(node?.file?.tags) ? node.file.tags : [];
+			const previousOwned = this.ownedLabelsFor(sourcePath);
+			const plan = planLabelChanges(previousOwned, current, before);
+			if (plan.toPreserve.length === 0) continue;
+			try {
+				await client.contentLabels.addLabelsToContent({
+					id: pageId,
+					body: plan.toPreserve.map((name) => ({ prefix: "global", name })),
+				});
+				console.log(
+					`[Confluence] Restored ${plan.toPreserve.length} manually-added label(s) on page ${pageId}: ${plan.toPreserve.join(", ")}`,
+				);
+			} catch (e) {
+				console.warn(`[Confluence] Could not restore labels on page ${pageId}:`, e);
+			}
+		}
+	}
+
+	/** Labels the plugin applied at the LAST publish, from the publish record. */
+	previousOwnedLabels: Map<string, string[]> = new Map();
+
+	private ownedLabelsFor(sourcePath: string): string[] {
+		return this.previousOwnedLabels.get(sourcePath) ?? [];
 	}
 
 	/**

@@ -1,5 +1,17 @@
 import { App, Setting, PluginSettingTab, Notice } from "obsidian";
 import ConfluencePlugin from "./main";
+import type { TaxonomyLabelField } from "./taxonomyLabels";
+
+/** Frontmatter fields offered as label sources (F8), in the order they appear. */
+const LABEL_SOURCE_FIELDS: TaxonomyLabelField[] = ["tags", "subject", "type", "domain", "status", "lifecycle_phase"];
+
+/** Text-area value -> trimmed, comment-free, non-empty lines. */
+function parseLines(value: string): string[] {
+	return value
+		.split("\n")
+		.map((line) => line.trim())
+		.filter((line) => line.length > 0 && !line.startsWith("#"));
+}
 
 export class ConfluenceSettingTab extends PluginSettingTab {
 	plugin: ConfluencePlugin;
@@ -265,6 +277,280 @@ export class ConfluenceSettingTab extends PluginSettingTab {
 					}),
 			);
 
+		containerEl.createEl("h2", { text: "Navigation: titles" });
+
+		new Setting(containerEl)
+			.setName("Page title source")
+			.setDesc(
+				"Where a page title comes from. A connie-title in frontmatter always wins. Frontmatter title tries the title field, then the first heading, then the filename; First heading skips the title field; Filename is the current behaviour.",
+			)
+			.addDropdown((dropdown) => {
+				dropdown
+					.addOptions({
+						filename: "Filename (default)",
+						"first-heading": "First heading, then filename",
+						frontmatter: "Frontmatter title, then first heading, then filename",
+					})
+					.setValue(this.plugin.settings.titleSource)
+					.onChange(async (value) => {
+						// @ts-expect-error narrowed by addOptions
+						this.plugin.settings.titleSource = value;
+						await this.plugin.saveSettings();
+					});
+			});
+
+		new Setting(containerEl)
+			.setName("Remove the body's first heading")
+			.setDesc(
+				"Confluence shows the page title above the body, so a note that opens with its own H1 renders it twice. When it matches the title removes the heading only where it restates the title, ignoring emoji, an identifier prefix and case.",
+			)
+			.addDropdown((dropdown) => {
+				dropdown
+					.addOptions({
+						never: "Never (default)",
+						"when-matching": "When it matches the title",
+						always: "Always",
+					})
+					.setValue(this.plugin.settings.consumeFirstHeading)
+					.onChange(async (value) => {
+						// @ts-expect-error narrowed by addOptions
+						this.plugin.settings.consumeFirstHeading = value;
+						await this.plugin.saveSettings();
+					});
+			});
+
+		new Setting(containerEl)
+			.setName("Folder page title source")
+			.setDesc(
+				"What a folder's page is called. Landing file uses the title of the folder's index/README/eponymous note, falling back to the display-name map and then the folder name. Folder name is the current behaviour.",
+			)
+			.addDropdown((dropdown) => {
+				dropdown
+					.addOptions({
+						segment: "Folder name (default)",
+						landing: "Landing file's title, then display names",
+					})
+					.setValue(this.plugin.settings.folderTitleSource)
+					.onChange(async (value) => {
+						// @ts-expect-error narrowed by addOptions
+						this.plugin.settings.folderTitleSource = value;
+						await this.plugin.saveSettings();
+					});
+			});
+
+		this.addJsonMapSetting(
+			containerEl,
+			"Folder display names",
+			"JSON map of folder name (or path relative to the publish folder) to the title its page should carry. A path entry beats a bare-name entry. Only used when the folder title source is Landing file.",
+			'{\n  "04_Nodes": "Node catalogue"\n}',
+			() => this.plugin.settings.folderDisplayNames,
+			(value) => {
+				this.plugin.settings.folderDisplayNames = value;
+			},
+		);
+
+		new Setting(containerEl)
+			.setName("Publish the root landing note into the parent page")
+			.setDesc(
+				"When the publish folder itself has an index/README note, write it into the configured parent page instead of creating a child page. The parent page is only overwritten if it is empty, was last edited by this account, or was already claimed by a previous run; otherwise the note publishes as a child, as it does today.",
+			)
+			.addToggle((toggle) =>
+				toggle.setValue(this.plugin.settings.publishRootLanding).onChange(async (value) => {
+					this.plugin.settings.publishRootLanding = value;
+					await this.plugin.saveSettings();
+				}),
+			);
+
+		new Setting(containerEl)
+			.setName("Children Display macro on folder pages")
+			.setDesc(
+				"Append a Children Display macro (depth 1, sorted by title) to folder pages, giving each one a clickable index. Generated landing notes only applies it to landing notes with generated: true in frontmatter.",
+			)
+			.addDropdown((dropdown) => {
+				dropdown
+					.addOptions({
+						off: "Off (default)",
+						"container-only": "Folders with no landing note",
+						"generated-landings": "Generated landing notes",
+						all: "All folder pages",
+					})
+					.setValue(this.plugin.settings.childrenMacro)
+					.onChange(async (value) => {
+						// @ts-expect-error narrowed by addOptions
+						this.plugin.settings.childrenMacro = value;
+						await this.plugin.saveSettings();
+					});
+			});
+
+		containerEl.createEl("h2", { text: "Navigation: what gets published" });
+
+		this.addLinesSetting(
+			containerEl,
+			"Exclusion patterns",
+			"One glob per line, matched against each note's path relative to the publish folder. Supports *, **, ? and [abc]; a leading ! re-includes. A note with connie-publish: true is published even if a pattern matches it. Lines starting with # are comments.",
+			"**/_drafts/**\n*.canvas\n!keep/**",
+			() => this.plugin.settings.excludeGlobs,
+			(value) => {
+				this.plugin.settings.excludeGlobs = value;
+			},
+		);
+
+		new Setting(containerEl)
+			.setName("Exclusion list file")
+			.setDesc(
+				"Vault-relative path to a file of more exclusion patterns, concatenated with the list above. A .yaml/.yml file uses a top-level exclude: list; anything else is one pattern per line with # comments.",
+			)
+			.addText((text) =>
+				text
+					.setPlaceholder("Knowledge/corpus-governance/confluence-exclusions.yaml")
+					.setValue(this.plugin.settings.excludeListFile)
+					.onChange(async (value) => {
+						this.plugin.settings.excludeListFile = value.trim();
+						await this.plugin.saveSettings();
+					}),
+			);
+
+		new Setting(containerEl)
+			.setName("Link and title check report")
+			.setDesc(
+				"Vault path the Check Confluence links and titles command writes its report to. The report is never published back to Confluence.",
+			)
+			.addText((text) =>
+				text
+					.setPlaceholder("_confluence-check.md")
+					.setValue(this.plugin.settings.dryRunReportPath)
+					.onChange(async (value) => {
+						this.plugin.settings.dryRunReportPath = value.trim();
+						await this.plugin.saveSettings();
+					}),
+			);
+
+		containerEl.createEl("h2", { text: "Navigation: links to non-markdown files" });
+
+		new Setting(containerEl)
+			.setName("Asset link handling")
+			.setDesc(
+				"What to do with a relative link to a script, notebook, PDF or other non-markdown file. Plain text is the honest default, because the relative link would be dead in Confluence; Attach uploads the file to the linking page; Base URL rewrites the link to point at a repository or web host.",
+			)
+			.addDropdown((dropdown) => {
+				dropdown
+					.addOptions({
+						text: "Render as plain text (default)",
+						attach: "Attach the file to the page",
+						"base-url": "Rewrite to a base URL",
+					})
+					.setValue(this.plugin.settings.assetLinkMode)
+					.onChange(async (value) => {
+						// @ts-expect-error narrowed by addOptions
+						this.plugin.settings.assetLinkMode = value;
+						await this.plugin.saveSettings();
+						this.display();
+					});
+			});
+
+		if (this.plugin.settings.assetLinkMode === "base-url") {
+			new Setting(containerEl)
+				.setName("Asset base URL")
+				.setDesc("Joined with the file's path relative to the vault root, e.g. a repository browse URL.")
+				.addText((text) =>
+					text
+						.setPlaceholder("https://git.example.com/vault/-/blob/main")
+						.setValue(this.plugin.settings.assetLinkBaseUrl)
+						.onChange(async (value) => {
+							this.plugin.settings.assetLinkBaseUrl = value.trim();
+							await this.plugin.saveSettings();
+						}),
+				);
+		}
+
+		this.addLinesSetting(
+			containerEl,
+			"Asset file extensions",
+			"Extensions (without the dot) treated as linkable assets, one per line. Images are always handled by the existing image pipeline regardless of this list.",
+			"py\nipynb\npdf",
+			() => this.plugin.settings.assetLinkExtensions,
+			(value) => {
+				this.plugin.settings.assetLinkExtensions = value.map((e) => e.replace(/^\./, "").toLowerCase());
+			},
+		);
+
+		containerEl.createEl("h2", { text: "Navigation: labels" });
+
+		new Setting(containerEl)
+			.setName("Frontmatter fields used as labels")
+			.setDesc(
+				"Which frontmatter fields are projected onto Confluence labels. Every value is normalised to a label-safe slug. Only applies when Map taxonomy terms to labels is on, except tags, which the library publishes regardless.",
+			);
+		for (const field of LABEL_SOURCE_FIELDS) {
+			new Setting(containerEl)
+				.setName(field)
+				.setClass("setting-item-nested")
+				.addToggle((toggle) =>
+					toggle.setValue(this.plugin.settings.labelSources?.[field] ?? false).onChange(async (value) => {
+						this.plugin.settings.labelSources = { ...this.plugin.settings.labelSources, [field]: value };
+						await this.plugin.saveSettings();
+					}),
+				);
+		}
+
+		new Setting(containerEl)
+			.setName("Label vocabulary file")
+			.setDesc(
+				"Vault-relative YAML controlled vocabulary. Every string under any top-level list is an allowed label; anything else is dropped and counted in the check report. Leave empty to allow all labels.",
+			)
+			.addText((text) =>
+				text
+					.setPlaceholder("Knowledge/corpus-governance/tag-vocabulary.yaml")
+					.setValue(this.plugin.settings.labelAllowlistFile)
+					.onChange(async (value) => {
+						this.plugin.settings.labelAllowlistFile = value.trim();
+						await this.plugin.saveSettings();
+					}),
+			);
+
+		this.addJsonMapSetting(
+			containerEl,
+			"Label prefixes",
+			"JSON map of frontmatter field to a prefix for the labels derived from it, so a type: hub becomes type-hub and can coexist with a plain hub tag.",
+			'{\n  "type": "type-"\n}',
+			() => this.plugin.settings.labelPrefixes,
+			(value) => {
+				this.plugin.settings.labelPrefixes = value;
+			},
+		);
+
+		this.addNumberSetting(
+			containerEl,
+			"Maximum labels per page",
+			"Cap on how many labels one page receives. 0 means no cap.",
+			"0",
+			() => this.plugin.settings.labelMaxPerPage,
+			(value) => {
+				this.plugin.settings.labelMaxPerPage = value;
+			},
+		);
+
+		containerEl.createEl("h2", { text: "Navigation: maths rendering" });
+
+		new Setting(containerEl)
+			.setName("LaTeX rendering")
+			.setDesc(
+				"How maths is published. Appfire macros needs the LaTeX Math add-on installed, so check your Confluence macro browser first. The readable fallback publishes the TeX source in a code block instead, which is legible everywhere.",
+			)
+			.addDropdown((dropdown) => {
+				dropdown
+					.addOptions({
+						appfire: "Appfire LaTeX macros (default)",
+						fallback: "Readable code-block fallback",
+					})
+					.setValue(this.plugin.settings.latexRendering)
+					.onChange(async (value) => {
+						// @ts-expect-error narrowed by addOptions
+						this.plugin.settings.latexRendering = value;
+						await this.plugin.saveSettings();
+					});
+			});
+
 		containerEl.createEl("h2", { text: "Large-vault tuning" });
 
 		new Setting(containerEl)
@@ -298,6 +584,39 @@ export class ConfluenceSettingTab extends PluginSettingTab {
 						await this.plugin.saveSettings();
 					}),
 			);
+
+		this.addNumberSetting(
+			containerEl,
+			"Request retries",
+			"How many times to retry a request that fails with 429, 502, 503, 504 or a network error. Other 4xx responses are never retried. Default 3.",
+			"3",
+			() => this.plugin.settings.retryMax,
+			(value) => {
+				this.plugin.settings.retryMax = value;
+			},
+		);
+
+		this.addNumberSetting(
+			containerEl,
+			"Retry backoff (ms)",
+			"Base delay before the first retry, doubled each attempt and jittered. A Retry-After header from the server wins. Default 1000.",
+			"1000",
+			() => this.plugin.settings.retryBaseMs,
+			(value) => {
+				this.plugin.settings.retryBaseMs = value;
+			},
+		);
+
+		this.addNumberSetting(
+			containerEl,
+			"Request timeout (ms)",
+			"Abort a single API request after this long. 0 disables the timeout. Default 60000.",
+			"60000",
+			() => this.plugin.settings.requestTimeoutMs,
+			(value) => {
+				this.plugin.settings.requestTimeoutMs = value;
+			},
+		);
 
 		new Setting(containerEl)
 			.setName("Debug logging")
@@ -339,6 +658,116 @@ export class ConfluenceSettingTab extends PluginSettingTab {
 						new Notice(`Failed to reset publish cache: ${err instanceof Error ? err.message : String(err)}`);
 					}
 				}),
+			);
+	}
+
+	/**
+	 * A multi-line text area whose value is a list of strings, one per line.
+	 * Blank lines and `#` comments are dropped, so a user can annotate a glob
+	 * list in place.
+	 */
+	private addLinesSetting(
+		containerEl: HTMLElement,
+		name: string,
+		desc: string,
+		placeholder: string,
+		get: () => string[],
+		set: (value: string[]) => void,
+	): void {
+		new Setting(containerEl)
+			.setName(name)
+			.setDesc(desc)
+			.addTextArea((area) => {
+				area.inputEl.rows = 5;
+				area.inputEl.style.width = "100%";
+				area
+					.setPlaceholder(placeholder)
+					.setValue(get().join("\n"))
+					.onChange(async (value) => {
+						set(parseLines(value));
+						await this.plugin.saveSettings();
+					});
+			});
+	}
+
+	/**
+	 * A multi-line text area holding a JSON object. Invalid JSON is left in the
+	 * box and NOT saved — silently discarding a half-typed map would lose a long
+	 * display-name list one keystroke at a time — and the reason is shown below
+	 * the field.
+	 */
+	private addJsonMapSetting(
+		containerEl: HTMLElement,
+		name: string,
+		desc: string,
+		placeholder: string,
+		get: () => Record<string, string>,
+		set: (value: Record<string, string>) => void,
+	): void {
+		let errorEl: HTMLElement | null = null;
+		const setting = new Setting(containerEl)
+			.setName(name)
+			.setDesc(desc)
+			.addTextArea((area) => {
+				area.inputEl.rows = 6;
+				area.inputEl.style.width = "100%";
+				area
+					.setPlaceholder(placeholder)
+					.setValue(JSON.stringify(get() ?? {}, null, 2))
+					.onChange(async (value) => {
+						const text = value.trim();
+						errorEl?.setText("");
+						if (text === "") {
+							set({});
+							await this.plugin.saveSettings();
+							return;
+						}
+						let parsed: unknown;
+						try {
+							parsed = JSON.parse(text);
+						} catch (e) {
+							errorEl?.setText(`Not valid JSON, so nothing was saved. ${e instanceof Error ? e.message : ""}`);
+							return;
+						}
+						if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+							errorEl?.setText("Expected a JSON object of key/title pairs, so nothing was saved.");
+							return;
+						}
+						const out: Record<string, string> = {};
+						for (const [key, val] of Object.entries(parsed as Record<string, unknown>)) {
+							if (typeof val === "string") out[key] = val;
+						}
+						set(out);
+						await this.plugin.saveSettings();
+					});
+			});
+		errorEl = setting.descEl.createDiv({ cls: "setting-item-description" });
+		errorEl.style.color = "var(--text-error)";
+	}
+
+	/** Non-negative integer text field. Out-of-range input is ignored, not saved. */
+	private addNumberSetting(
+		containerEl: HTMLElement,
+		name: string,
+		desc: string,
+		placeholder: string,
+		get: () => number,
+		set: (value: number) => void,
+		min = 0,
+	): void {
+		new Setting(containerEl)
+			.setName(name)
+			.setDesc(desc)
+			.addText((text) =>
+				text
+					.setPlaceholder(placeholder)
+					.setValue(String(get()))
+					.onChange(async (value) => {
+						const n = parseInt(value, 10);
+						if (!Number.isFinite(n) || n < min) return;
+						set(n);
+						await this.plugin.saveSettings();
+					}),
 			);
 	}
 }
