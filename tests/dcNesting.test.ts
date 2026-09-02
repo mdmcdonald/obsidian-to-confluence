@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import { deriveStructure, computeFolderTitles, buildTree } from "../src/folderTree";
 import { planReparents } from "../src/reparent";
+import { pruneTitleCollisions } from "../src/titlePreflight";
 import { ensureAllFilesExistInConfluence } from "@markdown-confluence/lib/dist/TreeConfluence.js";
 
 // End-to-end harness: runs the user's folder structure through the REAL library
@@ -32,7 +33,18 @@ function mockClient(preexisting: Record<string, { title: string; parent: string 
 		space: { key: "SP" },
 		version: { number: 1, by: { accountId: "ME" } },
 		body: { atlas_doc_format: { value: adfStr } },
-		ancestors: p.parent === PARENT ? [{ id: PARENT }] : [{ id: PARENT }, { id: p.parent }],
+		// Root-first chain, walked from the real parent links so a page under a
+		// DIFFERENT parent does not pretend to be under PARENT.
+		ancestors: (() => {
+			const chain: { id: string }[] = [];
+			let cur: string | undefined = p.parent;
+			while (cur && pages[cur]) {
+				chain.unshift({ id: cur });
+				cur = pages[cur].parent;
+			}
+			if (cur) chain.unshift({ id: cur });
+			return chain;
+		})(),
 	});
 	return {
 		pages,
@@ -241,4 +253,74 @@ test("F7: a root node carrying the parent id is skipped by the re-parent plan", 
 		},
 	]);
 	assert.deepEqual(moves, [{ pageId: "CHILD", targetId: PARENT, title: "A child" }]);
+});
+
+// --- title pre-flight: a collision must not fail the batch --------------------
+
+test("a title held outside the tree used to abort the whole batch; pre-flight isolates it", async () => {
+	// A page titled "Folder1" already exists under a DIFFERENT parent.
+	const stray = { STRAY: { title: "Folder1", parent: "OTHER_PARENT" } };
+
+	// Without the pre-flight, the library throws from tree creation and nothing
+	// in the batch is published.
+	await assert.rejects(() => run(PATHS, stray), /Folder1 is trying to overwrite a page outside the page tree/);
+
+	// With it, the colliding subtree is dropped and the rest publishes and nests.
+	const structure = deriveStructure(PATHS);
+	const folderTitle = computeFolderTitles(structure.folders, PATHS.map((p) => p.split("/").pop()!.replace(/\.md$/, "")));
+	const tree = buildTree(PATHS.map(mkFile), {
+		commonPath: structure.commonPath,
+		folderTitle,
+		indexFileByFolder: structure.indexFileByFolder,
+		folderFileAdf: { ...ADF },
+		convertFile: (mf: any) => ({
+			folderName: "",
+			absoluteFilePath: mf.absoluteFilePath,
+			fileName: mf.fileName,
+			contents: { ...ADF },
+			pageTitle: mf.pageTitle,
+			frontmatter: {},
+			tags: [],
+			pageId: mf.pageId,
+			dontChangeParentPageId: false,
+			contentType: "page",
+			blogPostDate: undefined,
+		}),
+	});
+	const mc = mockClient(stray, false);
+	const lookup = async (title: string) => {
+		const r = await mc.client.content.getContent({ title });
+		const page = r.results[0];
+		return page ? { id: page.id, ancestorIds: page.ancestors.map((a: any) => String(a.id)) } : undefined;
+	};
+	const preflight = await pruneTitleCollisions(tree, { lookup, topPageId: PARENT });
+
+	assert.deepEqual(
+		preflight.collisions.map((c) => [c.title, c.pageId]),
+		[["Folder1", "STRAY"]],
+	);
+	assert.deepEqual(
+		preflight.skipped.map((s) => s.sourcePath),
+		["TopFolder/Folder1/File1.md"],
+	);
+
+	const published: any[] = await ensureAllFilesExistInConfluence(
+		mc.client as any,
+		adaptor,
+		preflight.tree as any,
+		"SP",
+		PARENT,
+		PARENT,
+		settings,
+	);
+	const moves = planReparents(published);
+	for (const m of moves) if (mc.pages[m.pageId]) mc.pages[m.pageId].parent = m.targetId;
+
+	// Everything else was created and nested; the stray page was left alone.
+	assert.equal(parentOf(mc, "Folder2"), PARENT);
+	assert.equal(parentOf(mc, "File2"), idOf(mc, "Folder2"));
+	assert.equal(parentOf(mc, "Folder4"), idOf(mc, "Folder3"));
+	assert.equal(parentOf(mc, "File3"), idOf(mc, "Folder4"));
+	assert.equal(mc.pages.STRAY.parent, "OTHER_PARENT");
+	assert.equal(idOf(mc, "File1"), undefined, "the colliding folder's child was not created flat somewhere");
 });

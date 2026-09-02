@@ -336,6 +336,30 @@ export function computeFolderTitlesDetailed(
 	return { titles: result, origins };
 }
 
+/**
+ * The file-page titles a folder title must not collide with.
+ *
+ * A landing file is not a page of its own — it IS its folder's page — so its
+ * title must not count as "taken by a file" when its folder asks for that very
+ * title. Without this, every folder titled from its landing collides with
+ * itself and is qualified or hashed ("Radar / Radar Architecture",
+ * "Domain Knowledge (e79397)"). The promoted root landing is excluded for the
+ * same reason: it becomes the parent page, not a sibling.
+ */
+export function titlesExcludingLandings(
+	titlesByPath: ReadonlyMap<string, string>,
+	structure: Pick<DerivedStructure, "indexFileByFolder">,
+	alsoExclude: Iterable<string> = [],
+): string[] {
+	const landings = new Set<string>(structure.indexFileByFolder.values());
+	for (const path of alsoExclude) landings.add(path);
+	const out: string[] = [];
+	for (const [path, title] of titlesByPath) {
+		if (!landings.has(path)) out.push(title);
+	}
+	return out;
+}
+
 /** Backwards-compatible wrapper returning just the title map. */
 export function computeFolderTitles(
 	folders: FolderInfo[],

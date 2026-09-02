@@ -30,6 +30,7 @@ import {
 	relativeTo,
 	isPathInFolder,
 	resolveRelativePath,
+	titlesExcludingLandings,
 	type ChildrenMacroMode,
 	type DerivedStructure,
 	type FolderTitleOrigin,
@@ -501,11 +502,19 @@ export default class ObsidianAdaptor implements LoaderAdaptor {
 		this.landingToFolderTitle.clear();
 		if (this.preserveFolderStructure && paths.length > 0) {
 			const structure = deriveStructure(paths);
-			const { titles: folderTitles, origins } = computeFolderTitlesDetailed(
-				structure.folders,
-				this.publishTitleByPath.values(),
-				{ preferredTitle: (rel) => this.preferredFolderTitle(rel, structure) },
+			// A landing file becomes its folder's page, so its own title is not a
+			// competing file title — otherwise every landing-titled folder would
+			// collide with itself and be qualified or hashed.
+			const promotedRoot =
+				this.nav.publishRootLanding && this.rootLandingAllowed ? structure.rootLandingFile : undefined;
+			const takenByFiles = titlesExcludingLandings(
+				this.publishTitleByPath,
+				structure,
+				promotedRoot ? [promotedRoot] : [],
 			);
+			const { titles: folderTitles, origins } = computeFolderTitlesDetailed(structure.folders, takenByFiles, {
+				preferredTitle: (rel) => this.preferredFolderTitle(rel, structure),
+			});
 			this.folderTitleByPath = folderTitles;
 			this.folderTitleOrigin = origins;
 			this.structure = structure;
@@ -663,6 +672,11 @@ export default class ObsidianAdaptor implements LoaderAdaptor {
 			for (const label of labels) counts.set(label, (counts.get(label) ?? 0) + 1);
 		}
 		return counts;
+	}
+
+	/** Record a diagnostic raised outside the adaptor (e.g. the publisher's title pre-flight). */
+	recordDiagnostic(diagnostic: LinkDiagnostic): void {
+		this.addDiagnostic(diagnostic);
 	}
 
 	private addDiagnostic(diagnostic: LinkDiagnostic): void {

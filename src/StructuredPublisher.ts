@@ -23,6 +23,8 @@ import { ensureAllFilesExistInConfluence } from "@markdown-confluence/lib/dist/T
 import type ObsidianAdaptor from "./adaptors/obsidian";
 import { planReparents } from "./reparent";
 import { planLabelChanges } from "./publishState";
+import { makeDiagnostic } from "./linkDiagnostics";
+import { pruneTitleCollisions, type TitleLookupResult } from "./titlePreflight";
 
 type Any = any;
 
@@ -69,10 +71,46 @@ export function mayWriteRootLanding(input: {
 
 export class StructuredPublisher extends Publisher {
 	private structuredAdaptor: ObsidianAdaptor;
+	/**
+	 * Title → by-title lookup result (null = no such page), shared across the
+	 * batches of one publish so a folder title is searched once, not once per
+	 * batch. Cleared by `resetTitlePreflight()` at the start of each publish.
+	 */
+	private titleLookupCache = new Map<string, TitleLookupResult | null>();
 
 	constructor(adaptor: ObsidianAdaptor, settingsLoader: Any, confluenceClient: Any, adfProcessingPlugins: Any) {
 		super(adaptor, settingsLoader, confluenceClient, adfProcessingPlugins);
 		this.structuredAdaptor = adaptor;
+	}
+
+	/** Forget cached title lookups — a page may have been moved or deleted since the last run. */
+	resetTitlePreflight(): void {
+		this.titleLookupCache.clear();
+	}
+
+	/**
+	 * The same by-title search the library performs in ensurePageExists, so the
+	 * pre-flight agrees with it exactly. A lookup failure returns undefined and
+	 * lets the library's own path run (and fail, if it must) as before.
+	 */
+	private async findPageByTitle(title: string, spaceKey: string, client: Any): Promise<TitleLookupResult | undefined> {
+		try {
+			const found = await client.content.getContent({
+				type: "page",
+				spaceKey,
+				title,
+				expand: ["ancestors"],
+			});
+			const page = found?.results?.[0];
+			if (!page?.id) return undefined;
+			return {
+				id: String(page.id),
+				ancestorIds: (page.ancestors ?? []).map((a: Any) => String(a?.id)),
+			};
+		} catch (e) {
+			console.warn(`[Confluence] Title pre-flight lookup failed for "${title}":`, e);
+			return undefined;
+		}
 	}
 
 	override async publish(publishFilter?: string): Promise<Any> {
@@ -101,8 +139,31 @@ export class StructuredPublisher extends Publisher {
 
 		const files = await self.adaptor.getMarkdownFilesToUpload();
 		// ── the only change vs. the stock publisher ──────────────────────────
-		const folderTree = await this.structuredAdaptor.buildLocalAdfTree(files, settings);
+		const fullTree = await this.structuredAdaptor.buildLocalAdfTree(files, settings);
 		// ─────────────────────────────────────────────────────────────────────
+
+		// A title held by a page outside the parent's subtree makes the library
+		// throw from inside tree creation, failing the whole batch with one
+		// message per file. Find those first, drop them (and their subtrees) from
+		// this batch, and report each one with the page that holds the title.
+		const preflight = await pruneTitleCollisions(fullTree, {
+			lookup: (title) => this.findPageByTitle(title, spaceToPublishTo.key, self.confluenceClient),
+			topPageId: String(parentPage.id),
+			cache: this.titleLookupCache,
+		});
+		for (const c of preflight.collisions) {
+			console.error(
+				`[Confluence] Title collision: "${c.title}" (${c.sourcePath}) is already used by page ${c.pageId} outside the publish tree.`,
+			);
+			this.structuredAdaptor.recordDiagnostic(
+				makeDiagnostic("title-collides-in-space", c.sourcePath, c.title, `Confluence page ${c.pageId}`),
+			);
+		}
+		const folderTree = preflight.tree;
+		const preflightFailures = preflight.skipped.map((s) => ({
+			node: { file: { absoluteFilePath: s.sourcePath } },
+			reason: s.reason,
+		}));
 
 		const allPages = await ensureAllFilesExistInConfluence(
 			self.confluenceClient,
@@ -148,7 +209,7 @@ export class StructuredPublisher extends Publisher {
 		// publishFilter subset) so folder pages are fixed even on a single-file publish.
 		await this.enforceParentHierarchy(allPages, self.confluenceClient);
 
-		return results;
+		return [...results, ...preflightFailures];
 	}
 
 	/**

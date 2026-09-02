@@ -495,6 +495,8 @@ export default class ConfluencePlugin extends Plugin {
 			this.publisher.previousOwnedLabels = new Map(
 				Object.entries(this.settings.publishedPages).map(([path, rec]) => [path, rec.labels ?? []]),
 			);
+			// Title lookups are cached for the length of one publish only.
+			this.publisher.resetTitlePreflight();
 		}
 
 		const aggregate: UploadResults = {

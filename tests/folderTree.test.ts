@@ -12,6 +12,7 @@ import {
 	buildTree,
 	childrenMacroNode,
 	wantsChildrenMacro,
+	titlesExcludingLandings,
 } from "../src/folderTree";
 
 // ---------------------------------------------------------------------------
@@ -483,4 +484,82 @@ test("the off mode leaves every folder page exactly as it is today", () => {
 	assert.deepEqual(bare.file.contents, folderFileAdf);
 	const guide = tree.children.find((c: any) => c.name === "Guide");
 	assert.deepEqual(guide.file.contents, { type: "doc" });
+});
+
+// ---------------------------------------------------------------------------
+// F2 — a landing file's title must not compete with its own folder
+// ---------------------------------------------------------------------------
+
+test("titlesExcludingLandings drops landing files and the promoted root landing", () => {
+	const s = deriveStructure(["r/index.md", "r/radar/index.md", "r/radar/x.md", "r/other.md"]);
+	const titles = new Map([
+		["r/index.md", "Start Here"],
+		["r/radar/index.md", "Radar"],
+		["r/radar/x.md", "X"],
+		["r/other.md", "Other"],
+	]);
+	assert.deepEqual(titlesExcludingLandings(titles, s).sort(), ["Other", "Start Here", "X"]);
+	assert.deepEqual(titlesExcludingLandings(titles, s, ["r/index.md"]).sort(), ["Other", "X"]);
+});
+
+test("a folder titled from its landing keeps that title instead of colliding with itself", () => {
+	// Reproduces the corpus: domain/index.md is titled "Domain Knowledge" and the
+	// folder wants the same. Counting the landing as a file page hashed the folder.
+	const s = deriveStructure(["r/domain/index.md", "r/domain/radar/index.md", "r/domain/radar/x.md", "r/other.md"]);
+	const titles = new Map([
+		["r/domain/index.md", "Domain Knowledge"],
+		["r/domain/radar/index.md", "Radar"],
+		["r/domain/radar/x.md", "X"],
+		["r/other.md", "Other"],
+	]);
+	const preferred = (rel: string) => {
+		const landing = s.indexFileByFolder.get(rel);
+		const t = landing ? titles.get(landing) : undefined;
+		return t ? { title: t, origin: "landing" as const } : undefined;
+	};
+
+	// The buggy input: every title, landings included.
+	const buggy = computeFolderTitlesDetailed(s.folders, titles.values(), { preferredTitle: preferred });
+	assert.match(buggy.titles.get("domain")!, /^Domain Knowledge \([0-9a-f]{6}\)$/);
+	assert.equal(buggy.titles.get("domain/radar"), "Domain Knowledge / Radar");
+
+	// The fixed input.
+	const fixed = computeFolderTitlesDetailed(s.folders, titlesExcludingLandings(titles, s), {
+		preferredTitle: preferred,
+	});
+	assert.equal(fixed.titles.get("domain"), "Domain Knowledge");
+	assert.equal(fixed.titles.get("domain/radar"), "Radar");
+	assert.equal(fixed.origins.get("domain"), "landing");
+	assert.equal(fixed.origins.get("domain/radar"), "landing");
+});
+
+test("a NON-landing file with the folder's preferred title still forces qualification", () => {
+	const s = deriveStructure(["r/domain/index.md", "r/domain/radar/index.md", "r/domain/radar/x.md", "r/radar-overview.md"]);
+	const titles = new Map([
+		["r/domain/index.md", "Domain Knowledge"],
+		["r/domain/radar/index.md", "Radar"],
+		["r/domain/radar/x.md", "X"],
+		["r/radar-overview.md", "Radar"], // a real page, not a landing
+	]);
+	const preferred = (rel: string) => {
+		const landing = s.indexFileByFolder.get(rel);
+		const t = landing ? titles.get(landing) : undefined;
+		return t ? { title: t, origin: "landing" as const } : undefined;
+	};
+	const { titles: out } = computeFolderTitlesDetailed(s.folders, titlesExcludingLandings(titles, s), {
+		preferredTitle: preferred,
+	});
+	assert.equal(out.get("domain/radar"), "Domain Knowledge / Radar");
+});
+
+test("an eponymous landing no longer collides with its folder in segment mode", () => {
+	// Guide/Guide.md is the landing; its basename equals the folder name. Before,
+	// the folder was qualified against its own landing.
+	const s = deriveStructure(["r/Guide/Guide.md", "r/Guide/topic.md", "r/other.md"]);
+	const titles = new Map([
+		["r/Guide/Guide.md", "Guide"],
+		["r/Guide/topic.md", "topic"],
+		["r/other.md", "other"],
+	]);
+	assert.equal(computeFolderTitles(s.folders, titlesExcludingLandings(titles, s)).get("Guide"), "Guide");
 });
