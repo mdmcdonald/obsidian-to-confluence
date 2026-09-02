@@ -48,7 +48,9 @@ test("a title held by a page outside the tree is pruned and reported", async () 
 	const tree = root([folder("Radar", [leaf("r/radar/x.md", "X")]), leaf("r/other.md", "Other")]);
 	const result = await pruneTitleCollisions(tree, { lookup: s.lookup, topPageId: TOP });
 
-	assert.deepEqual(result.collisions, [{ sourcePath: "__folder__/Radar", title: "Radar", pageId: "999", insideTree: false }]);
+	assert.deepEqual(result.collisions, [
+		{ sourcePath: "__folder__/Radar", title: "Radar", pageId: "999", kind: "outside-tree" },
+	]);
 	// The folder and its subtree are gone; the unrelated sibling survives.
 	assert.deepEqual(
 		result.tree.children.map((c) => c.name),
@@ -153,4 +155,80 @@ test("the input tree is not mutated", async () => {
 	const before = JSON.stringify(tree);
 	await pruneTitleCollisions(tree, { lookup: s.lookup, topPageId: TOP });
 	assert.equal(JSON.stringify(tree), before);
+});
+
+// ---------------------------------------------------------------------------
+// Inside the tree, but somebody else's page
+// ---------------------------------------------------------------------------
+
+test("a title resolving to ANOTHER note's page inside the tree is a collision, not a reuse", async () => {
+	// Two domains each have a "04_Nodes" folder. Radar's was published first;
+	// left alone, the library would find it by title and write land's content
+	// into it, then the move pass would drag it (children and all) under land.
+	const s = space({ "04_Nodes": inside("777") });
+	const owners = new Map([["777", "r/radar/architecture/04_Nodes/index.md"]]);
+	const tree = root([leaf("r/land/architecture/04_Nodes/index.md", "04_Nodes")]);
+	const result = await pruneTitleCollisions(tree, {
+		lookup: s.lookup,
+		topPageId: TOP,
+		ownerOf: (id) => owners.get(id),
+	});
+	assert.deepEqual(result.collisions, [
+		{
+			sourcePath: "r/land/architecture/04_Nodes/index.md",
+			title: "04_Nodes",
+			pageId: "777",
+			kind: "owned-by-other-note",
+			holderSource: "r/radar/architecture/04_Nodes/index.md",
+		},
+	]);
+	assert.equal(result.tree.children.length, 0);
+	assert.match(result.skipped[0].reason, /published from "r\/radar\/architecture\/04_Nodes\/index\.md"/);
+	assert.match(result.skipped[0].reason, /would overwrite/);
+});
+
+test("a title resolving to this note's OWN page (by record) is fine", async () => {
+	const s = space({ "04_Nodes": inside("777") });
+	const owners = new Map([["777", "r/radar/architecture/04_Nodes/index.md"]]);
+	const tree = root([leaf("r/radar/architecture/04_Nodes/index.md", "04_Nodes")]);
+	const result = await pruneTitleCollisions(tree, { lookup: s.lookup, topPageId: TOP, ownerOf: (id) => owners.get(id) });
+	assert.deepEqual(result.collisions, []);
+	assert.equal(result.tree.children.length, 1);
+});
+
+test("a page with no recorded owner is reused as before", async () => {
+	const s = space({ Radar: inside("123") });
+	const tree = root([leaf("r/radar.md", "Radar")]);
+	const result = await pruneTitleCollisions(tree, { lookup: s.lookup, topPageId: TOP, ownerOf: () => undefined });
+	assert.deepEqual(result.collisions, []);
+});
+
+test("a folder that gains a landing file keeps its placeholder page", async () => {
+	// The page was created as a synthetic "__folder__/Guide" carrier; now
+	// Guide/index.md exists and is promoted. Same folder, same page.
+	const s = space({ Guide: inside("55") });
+	const owners = new Map([["55", "__folder__/Guide"]]);
+	const tree = root([{ ...leaf("r/Guide/index.md", "Guide"), children: [leaf("r/Guide/topic.md", "Topic")] }]);
+	const result = await pruneTitleCollisions(tree, { lookup: s.lookup, topPageId: TOP, ownerOf: (id) => owners.get(id) });
+	assert.deepEqual(result.collisions, []);
+});
+
+test("a placeholder folder never claims another placeholder's page as a collision", async () => {
+	// Two scoped publishes with segment titles both produce "__folder__/04_Nodes".
+	// The synthetic path carries no folder identity, so this cannot be told
+	// apart from a republish of the same folder; it is left to the user's title
+	// policy (landing-mode titles are domain-specific) rather than guessed.
+	const s = space({ "04_Nodes": inside("777") });
+	const owners = new Map([["777", "__folder__/04_Nodes"]]);
+	const tree = root([folder("04_Nodes", [])]);
+	const result = await pruneTitleCollisions(tree, { lookup: s.lookup, topPageId: TOP, ownerOf: (id) => owners.get(id) });
+	assert.deepEqual(result.collisions, []);
+});
+
+test("outside-tree still wins over ownership, and reports as such", async () => {
+	const s = space({ Radar: outside("999") });
+	const owners = new Map([["999", "r/radar.md"]]);
+	const tree = root([leaf("r/radar.md", "Radar")]);
+	const result = await pruneTitleCollisions(tree, { lookup: s.lookup, topPageId: TOP, ownerOf: (id) => owners.get(id) });
+	assert.equal(result.collisions[0].kind, "outside-tree");
 });

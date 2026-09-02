@@ -497,6 +497,13 @@ export default class ConfluencePlugin extends Plugin {
 			);
 			// Title lookups are cached for the length of one publish only.
 			this.publisher.resetTitlePreflight();
+			// Which note each known page came from, so a title that resolves to
+			// ANOTHER note's page is refused instead of silently overwriting it.
+			this.publisher.pageOwners = new Map(
+				Object.entries(this.settings.publishedPages)
+					.filter(([, rec]) => !!rec.pageId)
+					.map(([path, rec]) => [String(rec.pageId), path]),
+			);
 		}
 
 		const aggregate: UploadResults = {

@@ -27,14 +27,21 @@ export interface TitleLookupResult {
 /** Search the space for a page with this exact title; undefined when absent. */
 export type TitleLookup = (title: string) => Promise<TitleLookupResult | undefined>;
 
+export type CollisionKind =
+	/** The holder is outside the parent's subtree; the library would throw. */
+	| "outside-tree"
+	/** The holder is inside the tree but was published from a DIFFERENT note; the library would silently overwrite it. */
+	| "owned-by-other-note";
+
 export interface TitleCollision {
 	/** Vault path of the note (or the folder's synthetic path) that wanted the title. */
 	sourcePath: string;
 	title: string;
 	/** The page that already holds the title. */
 	pageId: string;
-	/** True when the holder is under the configured parent (never a collision). */
-	insideTree: boolean;
+	kind: CollisionKind;
+	/** For "owned-by-other-note": the vault path that page was published from. */
+	holderSource?: string;
 }
 
 export interface SkippedFile {
@@ -54,6 +61,13 @@ export interface PreflightOptions {
 	lookup: TitleLookup;
 	/** The configured parent page id; a holder is "inside" when this is an ancestor. */
 	topPageId: string;
+	/**
+	 * Which vault path a Confluence page was last published from (the plugin's
+	 * publish record), so a title that resolves to ANOTHER note's page — inside
+	 * the tree, where the library would reuse it without complaint — is caught
+	 * before that note's content is overwritten and its page moved.
+	 */
+	ownerOf?: (pageId: string) => string | undefined;
 	/**
 	 * Optional cache shared across batches: title → lookup result (null = absent).
 	 * Folder titles recur in every batch; without this each is searched N times.
@@ -78,6 +92,18 @@ export function collisionReason(title: string, pageId: string): string {
 	);
 }
 
+export function ownedByOtherReason(title: string, pageId: string, holderSource: string): string {
+	return (
+		`Title "${title}" is already used by Confluence page ${pageId}, which was published from "${holderSource}". ` +
+		`Publishing this note would overwrite that page and move it here. Give one of the two a different title.`
+	);
+}
+
+/** A synthetic folder carrier is not another note: a folder gaining a landing file keeps its page. */
+function isSyntheticOwner(path: string | undefined): boolean {
+	return typeof path === "string" && path.startsWith("__folder__/");
+}
+
 export function descendantReason(folderTitle: string, pageId: string): string {
 	return `Not published: its folder page "${folderTitle}" cannot be created — that title is already used by Confluence page ${pageId} outside the publish tree.`;
 }
@@ -89,7 +115,7 @@ export function descendantReason(folderTitle: string, pageId: string): string {
  * is never a collision either.
  */
 export async function pruneTitleCollisions(tree: FolderTreeNode, options: PreflightOptions): Promise<PreflightResult> {
-	const { lookup, topPageId } = options;
+	const { lookup, topPageId, ownerOf } = options;
 	const cache = options.cache ?? new Map<string, TitleLookupResult | null>();
 	const collisions: TitleCollision[] = [];
 	const skipped: SkippedFile[] = [];
@@ -111,9 +137,22 @@ export async function pruneTitleCollisions(tree: FolderTreeNode, options: Prefli
 				if (found) {
 					const insideTree = found.ancestorIds.some((id) => String(id) === String(topPageId));
 					const sourcePath = typeof file?.absoluteFilePath === "string" ? file.absoluteFilePath : title;
+					let collision: TitleCollision | undefined;
 					if (!insideTree) {
-						collisions.push({ sourcePath, title, pageId: found.id, insideTree });
-						if (isRealNote(file)) skipped.push({ sourcePath, reason: collisionReason(title, found.id) });
+						collision = { sourcePath, title, pageId: found.id, kind: "outside-tree" };
+					} else if (ownerOf) {
+						const owner = ownerOf(found.id);
+						if (owner && owner !== sourcePath && !isSyntheticOwner(owner) && !isSyntheticOwner(sourcePath)) {
+							collision = { sourcePath, title, pageId: found.id, kind: "owned-by-other-note", holderSource: owner };
+						}
+					}
+					if (collision) {
+						collisions.push(collision);
+						const own =
+							collision.kind === "outside-tree"
+								? collisionReason(title, found.id)
+								: ownedByOtherReason(title, found.id, collision.holderSource ?? "");
+						if (isRealNote(file)) skipped.push({ sourcePath, reason: own });
 						const descendants: string[] = [];
 						for (const child of node.children) collectNotes(child, descendants);
 						for (const path of descendants) {

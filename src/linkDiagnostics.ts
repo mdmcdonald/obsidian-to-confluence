@@ -23,7 +23,8 @@ export type LinkDiagnosticKind =
 	| "landing-conflict"
 	| "title-truncated"
 	| "root-landing-refused"
-	| "title-collides-in-space";
+	| "title-collides-in-space"
+	| "title-collides-with-note";
 
 export type DiagnosticSeverity = "error" | "warning";
 
@@ -53,6 +54,7 @@ export const LINK_DIAGNOSTIC_KINDS: readonly LinkDiagnosticKind[] = [
 	"title-truncated",
 	"root-landing-refused",
 	"title-collides-in-space",
+	"title-collides-with-note",
 ];
 
 /** Default severity per kind. A link that silently points at the wrong page is
@@ -71,6 +73,7 @@ export const DIAGNOSTIC_SEVERITY: Record<LinkDiagnosticKind, DiagnosticSeverity>
 	"title-truncated": "warning",
 	"root-landing-refused": "warning",
 	"title-collides-in-space": "error",
+	"title-collides-with-note": "error",
 };
 
 /** One-line human summary per kind, used by the report and the modal. */
@@ -88,6 +91,7 @@ export const DIAGNOSTIC_LABEL: Record<LinkDiagnosticKind, string> = {
 	"title-truncated": "Title shortened to fit Confluence's 255-character limit",
 	"root-landing-refused": "Root landing not written into the parent page",
 	"title-collides-in-space": "Title already used by a page outside the publish tree",
+	"title-collides-with-note": "Title already used by a page published from another note",
 };
 
 export type DiagnosticSink = (diagnostic: LinkDiagnostic) => void;

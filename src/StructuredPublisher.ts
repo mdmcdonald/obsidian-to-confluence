@@ -77,6 +77,12 @@ export class StructuredPublisher extends Publisher {
 	 * batch. Cleared by `resetTitlePreflight()` at the start of each publish.
 	 */
 	private titleLookupCache = new Map<string, TitleLookupResult | null>();
+	/**
+	 * Confluence page id → the vault path it was last published from (from the
+	 * plugin's publish record). Lets the pre-flight tell "this note's own page"
+	 * from "another note's page that happens to carry the same title".
+	 */
+	pageOwners: Map<string, string> = new Map();
 
 	constructor(adaptor: ObsidianAdaptor, settingsLoader: Any, confluenceClient: Any, adfProcessingPlugins: Any) {
 		super(adaptor, settingsLoader, confluenceClient, adfProcessingPlugins);
@@ -150,13 +156,23 @@ export class StructuredPublisher extends Publisher {
 			lookup: (title) => this.findPageByTitle(title, spaceToPublishTo.key, self.confluenceClient),
 			topPageId: String(parentPage.id),
 			cache: this.titleLookupCache,
+			ownerOf: (pageId) => this.pageOwners.get(String(pageId)),
 		});
 		for (const c of preflight.collisions) {
-			console.error(
-				`[Confluence] Title collision: "${c.title}" (${c.sourcePath}) is already used by page ${c.pageId} outside the publish tree.`,
-			);
+			const where =
+				c.kind === "outside-tree"
+					? `page ${c.pageId} outside the publish tree`
+					: `page ${c.pageId}, published from "${c.holderSource}"`;
+			console.error(`[Confluence] Title collision: "${c.title}" (${c.sourcePath}) is already used by ${where}.`);
 			this.structuredAdaptor.recordDiagnostic(
-				makeDiagnostic("title-collides-in-space", c.sourcePath, c.title, `Confluence page ${c.pageId}`),
+				makeDiagnostic(
+					c.kind === "outside-tree" ? "title-collides-in-space" : "title-collides-with-note",
+					c.sourcePath,
+					c.title,
+					c.kind === "outside-tree"
+						? `Confluence page ${c.pageId}`
+						: `Confluence page ${c.pageId} from ${c.holderSource}`,
+				),
 			);
 		}
 		const folderTree = preflight.tree;
